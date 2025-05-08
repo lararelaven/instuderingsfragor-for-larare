@@ -12,7 +12,7 @@ app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname)));
 
 // Initialize OpenAI API
-const configuration = Configuration({
+const configuration = new Configuration({
     apiKey: process.env.OPENAI_API_KEY, // Set your OpenAI API key in an environment variable
 });
 const openai = new OpenAIApi(configuration);
