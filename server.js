@@ -12,10 +12,9 @@ app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname)));
 
 // Initialize OpenAI API
-const configuration = new Configuration({
+const openai = new OpenAIApi({
     apiKey: process.env.OPENAI_API_KEY, // Set your OpenAI API key in an environment variable
 });
-const openai = new OpenAIApi(configuration);
 
 app.post('/generate-questions', (req, res) => {
     const { svtLink, questionCount, questionType } = req.body;
