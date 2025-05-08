@@ -3,7 +3,7 @@ const bodyParser = require('body-parser');
 const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { Configuration, OpenAIApi } = require('openai');
+const { OpenAIApi, Configuration } = require('openai');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,9 +12,10 @@ app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname)));
 
 // Initialize OpenAI API
-const openai = new OpenAIApi({
+const configuration = new Configuration({
     apiKey: process.env.OPENAI_API_KEY, // Set your OpenAI API key in an environment variable
 });
+const openai = new OpenAIApi(configuration);
 
 app.post('/generate-questions', (req, res) => {
     const { svtLink, questionCount, questionType } = req.body;
