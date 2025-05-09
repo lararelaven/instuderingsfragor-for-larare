@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="sv">
 
 <head>
     <meta charset="UTF-8">
@@ -13,23 +13,33 @@
         <h1>Instuderingsfrågor Generator</h1>
         <form id="questionForm">
             <label for="svtLink">Klistra in SVT Play-länk:</label>
-            <input type="url" id="svtLink" name="svtLink" required>
+            <input type="url" id="svtLink" name="svtLink" placeholder="https://www.svtplay.se/..." required>
 
             <label for="questionCount">Antal frågor:</label>
-            <input type="number" id="questionCount" name="questionCount" min="1" required>
+            <input type="number" id="questionCount" name="questionCount" min="1" value="5" required>
 
-            <label for="questionType">Typ av frågor:</label>
+            <label for="questionType">Typ av frågor (håll Ctrl/Cmd för att välja flera):</label>
             <select id="questionType" name="questionType" multiple required>
-                <option value="multipleChoice">Flerval</option>
-                <option value="shortAnswer">Kortsvar</option>
-                <option value="discussion">Diskussion</option>
+                <option value="flervalsfrågor" selected>Flerval</option>
+                <option value="kortsvar">Kortsvar</option>
+                <option value="diskussionsfrågor">Diskussion</option>
             </select>
 
             <button type="submit">Generera frågor</button>
         </form>
-        <div id="output">
-            <textarea id="questionsOutput" rows="10" style="resize: vertical; width: 100%;" readonly></textarea>
-            <button id="downloadWord">Ladda ner som Word</button>
+
+        <div id="loadingIndicator" style="display: none; margin-top: 15px; color: #007bff;">Genererar frågor, vänligen
+            vänta... Detta kan ta en stund.</div>
+        <div id="errorDisplay"
+            style="display: none; margin-top: 15px; color: red; border: 1px solid red; padding: 10px; border-radius: 5px;">
+        </div>
+
+        <div id="output" style="margin-top: 20px;">
+            <h2>Genererade frågor:</h2>
+            <textarea id="questionsOutput" rows="15"
+                style="resize: vertical; width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 5px;"
+                readonly></textarea>
+            <button id="downloadWord" style="margin-top: 10px;">Ladda ner som Word</button>
         </div>
     </div>
     <script src="script.js"></script>
