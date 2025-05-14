@@ -12,35 +12,63 @@
     <div class="container">
         <h1>Instuderingsfrågor Generator</h1>
         <form id="questionForm">
-            <label for="svtLink">Klistra in SVT Play-länk:</label>
-            <input type="url" id="svtLink" name="svtLink" placeholder="https://www.svtplay.se/..." required>
+            <label for="mediaLink">Klistra in SVT Play- eller YouTube-länk:</label>
+            <input type="url" id="mediaLink" name="mediaLink"
+                placeholder="https://www.svtplay.se/... eller youtube.com..." required>
 
-            <label for="questionCount">Antal frågor:</label>
-            <input type="number" id="questionCount" name="questionCount" min="1" value="5" required>
+            <fieldset>
+                <legend>Ange antal för varje frågetyp:</legend>
+                <div>
+                    <label for="mcqCount">Antal flervalsfrågor:</label>
+                    <input type="number" id="mcqCount" name="mcqCount" min="0" value="6" step="1">
+                </div>
+                <div>
+                    <label for="shortAnswerCount">Antal kortsvarfrågor:</label>
+                    <input type="number" id="shortAnswerCount" name="shortAnswerCount" min="0" value="3" step="1">
+                </div>
+                <div>
+                    <label for="discussionCount">Antal diskussionsfrågor:</label>
+                    <input type="number" id="discussionCount" name="discussionCount" min="0" value="1" step="1">
+                </div>
+            </fieldset>
 
-            <label for="questionType">Typ av frågor (håll Ctrl/Cmd för att välja flera):</label>
-            <select id="questionType" name="questionType" multiple required>
-                <option value="flervalsfrågor" selected>Flerval</option>
-                <option value="kortsvar">Kortsvar</option>
-                <option value="diskussionsfrågor">Diskussion</option>
-            </select>
-
-            <button type="submit">Generera frågor</button>
+            <button type="submit" id="generateBtn">Generera elevfrågor</button>
+            <button type="button" id="generatePromptBtn" style="margin-top: 10px; background-color: #f0ad4e;">Generera
+                prompt för AI</button>
+            <button type="button" id="downloadVideoBtn" style="margin-top: 10px; background-color: #337ab7;">Hämta
+                video</button>
         </form>
 
-        <div id="loadingIndicator" style="display: none; margin-top: 15px; color: #007bff;">Genererar frågor, vänligen
-            vänta... Detta kan ta en stund.</div>
-        <div id="errorDisplay"
-            style="display: none; margin-top: 15px; color: red; border: 1px solid red; padding: 10px; border-radius: 5px;">
+        <div id="loadingIndicator" style="display: none;">Bearbetar, vänligen vänta... <span class="spinner"></span>
+        </div>
+        <div id="errorDisplay" style="display: none; color: red; margin-top: 10px;"></div>
+
+        <div id="promptOutputContainer" style="display: none; margin-top: 20px;">
+            <h2>Förslag på Prompt för AI:</h2>
+            <p>
+                <button type="button" id="copyGeneratedPromptBtn" style="margin-right: 5px;">Kopiera texten</button>
+                nedan och använd den med din valda AI-modell (t.ex. via ett externt verktyg eller API) för att generera
+                instuderingsfrågor.
+            </p>
+            <textarea id="generatedPromptOutput" rows="20"
+                style="width: 100%; font-family: monospace; white-space: pre-wrap;"></textarea>
         </div>
 
-        <div id="output" style="margin-top: 20px;">
-            <h2>Genererade frågor:</h2>
-            <textarea id="questionsOutput" rows="15"
-                style="resize: vertical; width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 5px;"
-                readonly></textarea>
-            <button id="downloadWord" style="margin-top: 10px;">Ladda ner som Word</button>
+        <div id="outputContainer" style="display: none; margin-top: 20px;">
+            <div class="version-container" id="student-column">
+                <h2>📘 Elevversion – Instuderingsfrågor (utan svar)</h2>
+                <div id="studentVersionOutput" class="output-box">
+                </div>
+                <button id="getAnswersBtn" style="display: none; margin-top: 10px;">Hämta facit</button>
+            </div>
+
+            <div class="version-container" id="teacher-column" style="display: none;">
+                <h2>👩‍🏫 Lärarversion – Med facit</h2>
+                <div id="teacherVersionOutput" class="output-box">
+                </div>
+            </div>
         </div>
+        <button id="downloadWordBtn" style="display: none; margin: 20px auto; width: auto;">Ladda ner som Word</button>
     </div>
     <script src="script.js"></script>
 </body>

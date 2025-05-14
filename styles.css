@@ -1,52 +1,248 @@
 body {
-    font-family: Arial, sans-serif;
-    background-color: #f4f4f9;
+    font-family: sans-serif;
+    line-height: 1.6;
     margin: 0;
-    padding: 0;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    height: 100vh;
+    padding: 20px;
+    background-color: #f4f4f4;
+    color: #333;
 }
 
 .container {
+    width: 90%;
+    max-width: 1200px;
+    margin: auto;
     background: #fff;
     padding: 20px;
     border-radius: 8px;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-    width: 100%;
-    max-width: 400px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
 }
 
 h1 {
-    font-size: 1.5em;
-    margin-bottom: 20px;
     text-align: center;
+    color: #333;
 }
 
-label {
+h2 {
+    color: #555;
+    border-bottom: 1px solid #eee;
+    padding-bottom: 5px;
+    margin-top: 30px;
+}
+
+#outputContainer h2,
+#promptOutputContainer h2 {
+    margin-top: 0;
+}
+
+
+form label {
     display: block;
     margin-bottom: 5px;
     font-weight: bold;
 }
 
-input,
-select,
-button {
+form input[type="url"],
+form input[type="number"],
+form select,
+textarea#generatedPromptOutput {
+    /* Inkludera textarean här */
     width: 100%;
-    padding: 10px;
+    padding: 8px;
     margin-bottom: 15px;
-    border: 1px solid #ccc;
     border-radius: 4px;
+    border: 1px solid #ddd;
+    box-sizing: border-box;
 }
 
-button {
-    background-color: #007BFF;
+textarea#generatedPromptOutput {
+    font-family: monospace;
+    white-space: pre-wrap;
+    /* Behåll formatering men tillåt radbrytning */
+    min-height: 200px;
+    /* Ge den lite mer höjd */
+}
+
+
+form button,
+/* Generell knappstyling */
+#downloadWordBtn,
+#getAnswersBtn,
+#copyPromptBtn {
+    display: inline-block;
+    /* För att tillåta margin och padding korrekt */
+    padding: 10px 15px;
     color: white;
     border: none;
+    border-radius: 4px;
     cursor: pointer;
+    font-size: 16px;
+    margin-right: 10px;
+    /* Lite mellanrum mellan knappar */
+    margin-bottom: 10px;
+    /* För wrap på små skärmar */
 }
 
-button:hover {
+form button[type="submit"] {
+    background-color: #5cb85c;
+    /* Grön för huvudåtgärd */
+}
+
+form button[type="submit"]:hover {
+    background-color: #4cae4c;
+}
+
+#generatePromptBtn {
+    background-color: #f0ad4e;
+    /* Orange för alternativ åtgärd */
+}
+
+#generatePromptBtn:hover {
+    background-color: #ec971f;
+}
+
+#downloadWordBtn,
+#getAnswersBtn,
+#copyPromptBtn {
+    background-color: #007bff;
+    /* Blå för sekundära åtgärder */
+}
+
+#downloadWordBtn:hover,
+#getAnswersBtn:hover,
+#copyPromptBtn:hover {
     background-color: #0056b3;
+}
+
+form button:disabled,
+#downloadWordBtn:disabled,
+#getAnswersBtn:disabled,
+#copyPromptBtn:disabled {
+    background-color: #ccc;
+    cursor: not-allowed;
+}
+
+
+#loadingIndicator {
+    text-align: center;
+    margin-top: 20px;
+    font-style: italic;
+    display: flex;
+    /* För att centrera spinnern vertikalt */
+    align-items: center;
+    justify-content: center;
+}
+
+.spinner {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    border: 3px solid rgba(0, 0, 0, .1);
+    border-radius: 50%;
+    border-top-color: #333;
+    animation: spin 1s ease-in-out infinite;
+    margin-left: 10px;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+#outputContainer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    align-items: flex-start;
+}
+
+.version-container {
+    flex: 1;
+    min-width: 300px;
+}
+
+
+.output-box {
+    border: 1px solid #e0e0e0;
+    padding: 15px;
+    margin-top: 10px;
+    border-radius: 5px;
+    background-color: #f9f9f9;
+    min-height: 200px;
+    /* Sätt en min-höjd istället för fast höjd */
+    max-height: 500px;
+    /* Max höjd innan scroll */
+    overflow-y: auto;
+}
+
+.question-item {
+    margin-bottom: 20px;
+    padding-bottom: 10px;
+    border-bottom: 1px dashed #ccc;
+}
+
+.question-item:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+    padding-bottom: 0;
+}
+
+.question-text {
+    font-weight: bold;
+    margin-bottom: 8px;
+}
+
+.options-list {
+    list-style-type: none;
+    padding-left: 0;
+    margin-top: 5px;
+}
+
+.options-list li {
+    margin-bottom: 5px;
+}
+
+.answer-text {
+    margin-top: 8px;
+}
+
+.error-text {
+    color: red;
+    font-style: italic;
+}
+
+fieldset {
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 15px;
+    margin-bottom: 20px;
+}
+
+fieldset legend {
+    font-weight: bold;
+    padding: 0 5px;
+    color: #333;
+}
+
+fieldset div {
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    /* Tillåt wrap för responsivitet */
+}
+
+fieldset label {
+    flex-basis: 180px;
+    margin-bottom: 0;
+    margin-right: 10px;
+    /* Lite utrymme till input */
+}
+
+fieldset input[type="number"] {
+    flex-grow: 1;
+    min-width: 60px;
+    /* Se till att input inte blir för smal */
+    width: auto;
+    margin-bottom: 0;
 }
