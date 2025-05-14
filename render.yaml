@@ -1,0 +1,36 @@
+# render.yaml
+# Detta är en konfigurationsfil för Render.
+# Läs mer på https://render.com/docs/blueprint-spec
+
+services:
+  - type: web # Typ av tjänst. 'web' är vanligt för webbservrar.
+    name: instuderingsfragor-generator # Ett namn för din tjänst på Render.
+    env: docker # VIKTIGT: Specificerar att miljön ska byggas med Docker.
+    dockerfilePath: ./Dockerfile # Sökvägen till din Dockerfile i repositoryt.
+    # healthCheckPath: / # Valfritt: En sökväg som Render kan pinga för att se om din tjänst är frisk.
+                       # Din app serverar index.html på roten, så detta bör fungera.
+    envVars: # Här lägger du till dina miljövariabler (secrets)
+      - key: NODE_ENV
+        value: production
+      - key: PORT # Render sätter automatiskt PORT till 10000, men din Dockerfile exponerar den också.
+        value: 10000 # Din app i server.js lyssnar på process.env.PORT || 3000, så detta matchar Renders standard.
+      - key: NOVITA_API_KEY
+        sync: false # Rekommenderas för hemligheter, sätts via Render dashboard.
+      - key: NOVITA_API_ENDPOINT
+        sync: false # Rekommenderas för hemligheter, sätts via Render dashboard.
+      - key: NOVITA_MODEL_NAME
+        sync: false # Rekommenderas för hemligheter, sätts via Render dashboard.
+      - key: NOVITA_STT_API_ENDPOINT
+        sync: false # Rekommenderas för hemligheter, sätts via Render dashboard.
+      - key: NOVITA_WHISPER_MODEL_NAME
+        sync: false # Rekommenderas för hemligheter, sätts via Render dashboard.
+    region: gothenburg # Valfritt: Välj den region som är närmast dina användare.
+                       # Tillgängliga regioner: oregon, frankfurt, ohio, singapore.
+    plan: free # Valfritt: Välj din plan (t.ex. free, starter). För Docker kan 'starter' krävas för vissa resurser.
+               # Kolla Renders dokumentation för aktuella begränsningar för gratisplanen med Docker.
+    # autoDeploy: true # Valfritt: Sätt till false om du inte vill att Render ska auto-deploya vid varje push till main-grenen.
+    # disk: # Om din applikation behöver skriva mycket temporär data som överskrider Docker-lagrets gränser,
+            # kan du behöva lägga till en disk. svtplay-dl och ffmpeg kan vara diskintensiva.
+      # name: temp-data
+      # mountPath: /tmp # Monterar disken på /tmp, där dina temporära filer verkar sparas.
+      # sizeGB: 10 # Justera storleken efter behov. Diskar kostar extra.
