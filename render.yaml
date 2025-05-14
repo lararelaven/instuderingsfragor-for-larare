@@ -24,7 +24,7 @@ services:
         sync: false # Rekommenderas för hemligheter, sätts via Render dashboard.
       - key: NOVITA_WHISPER_MODEL_NAME
         sync: false # Rekommenderas för hemligheter, sätts via Render dashboard.
-    region: gothenburg # Valfritt: Välj den region som är närmast dina användare.
+    # region: gothenburg # Valfritt: Välj den region som är närmast dina användare.
                        # Tillgängliga regioner: oregon, frankfurt, ohio, singapore.
     plan: free # Valfritt: Välj din plan (t.ex. free, starter). För Docker kan 'starter' krävas för vissa resurser.
                # Kolla Renders dokumentation för aktuella begränsningar för gratisplanen med Docker.
