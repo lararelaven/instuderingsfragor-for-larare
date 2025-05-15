@@ -46,7 +46,6 @@ COPY . .
 EXPOSE ${PORT:-3000}
 
 RUN which svtplay-dl
-RUN ls -l /usr/local/bin/svtplay-dl
 
 # Kommando för att starta appen
 # Render använder Start Command från sina inställningar, men detta är bra som fallback/lokal Docker-körning
