@@ -22,7 +22,7 @@ RUN apt-get update && \
 RUN pip3 install --no-cache-dir svtplay-dl
 
 # Kopiera package.json och package-lock.json (eller yarn.lock)
-COPY package*.json./
+COPY package*.json .
 
 # Installera Node.js-beroenden
 # Om du använder npm ci, se till att package-lock.json är uppdaterad
@@ -30,7 +30,7 @@ RUN npm install --omit=dev
 # Alternativt: npm ci --only=production
 
 # Kopiera resten av applikationskoden
-COPY..
+COPY . .
 
 # Exponera porten som appen körs på (Render kommer att mappa denna)
 # PORT-miljövariabeln sätts automatiskt av Render till 10000, men din app lyssnar på process.env.PORT
