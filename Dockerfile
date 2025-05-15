@@ -12,14 +12,23 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
+    python3-venv \ 
     ffmpeg \
     curl \
     apt-utils \
     gnupg \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Installera svtplay-dl via pip (eller använd deras apt repo om du föredrar) [1]
-RUN pip3 install --no-cache-dir svtplay-dl
+# Skapa en virtuell miljö och installera svtplay-dl i den
+ENV VIRTUAL_ENV=/opt/venv
+RUN python3 -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH" 
+
+RUN pip3 install --no-cache-dir svtplay-dl # Detta kommer nu använda pip från venv
+
+# Dina felsökningsrader (bör nu hitta svtplay-dl i /opt/venv/bin/svtplay-dl)
+RUN which svtplay-dl
+RUN ls -l $VIRTUAL_ENV/bin/svtplay-dl
 
 # Kopiera package.json och package-lock.json (eller yarn.lock)
 COPY package*.json .
