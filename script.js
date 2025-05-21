@@ -19,17 +19,72 @@ document.addEventListener('DOMContentLoaded', () => {
     const promptOutputContainer = document.getElementById('promptOutputContainer');
     const generatedPromptTextarea = document.getElementById('generatedPromptOutput');
     const copyGeneratedPromptButton = document.getElementById('copyGeneratedPromptBtn');
-
-    const downloadVideoBtn = document.getElementById('downloadVideoBtn'); // NYTT: Referens till knappen
+    
+    const downloadVideoBtn = document.getElementById('downloadVideoBtn');
 
     let generatedStudentQuestions = "";
+    let currentVideoJobId = null;
+    let pollIntervalId = null;
 
-    function resetUIState(isDownloadingVideo = false) { // Lade till parameter
+    // Funktion för att uppdatera UI-status (generell laddningsindikator och felmeddelanden)
+    function updateGlobalLoadingState(isLoading, message = 'Bearbetar, vänligen vänta...') {
+        if (isLoading) {
+            loadingIndicator.innerHTML = `${message} <span class="spinner"></span>`; // Inkludera spinner
+            loadingIndicator.style.display = 'flex'; // Använd flex för att centrera spinnern
+        } else {
+            loadingIndicator.style.display = 'none';
+            loadingIndicator.innerHTML = ''; // Rensa innehåll
+        }
+    }
+
+    function displayGlobalError(errorMessage) {
+        errorDisplay.textContent = errorMessage;
+        errorDisplay.style.display = 'block';
+        updateGlobalLoadingState(false); // Dölj laddningsindikatorn om ett fel visas
+    }
+
+    function clearGlobalError() {
+        errorDisplay.textContent = '';
+        errorDisplay.style.display = 'none';
+    }
+
+    // Dedikerad funktion för att hantera videonedladdnings-UI och status
+    function updateVideoDownloadStatusUI(statusMessage, isError = false, showSpinner = false) {
+        // Använd loadingIndicator för videostatus för enkelhetens skull,
+        // men du kan skapa ett dedikerat element för detta.
+        if (statusMessage || showSpinner) {
+            loadingIndicator.style.display = 'flex';
+            let textContent = statusMessage || (showSpinner ? 'Bearbetar video...' : '');
+            loadingIndicator.innerHTML = `${textContent} ${showSpinner ? '<span class="spinner"></span>' : ''}`;
+            if (isError) {
+                // Om det är ett fel specifikt för video, kan vi visa det i errorDisplay också
+                // eller direkt i loadingIndicator. Här väljer vi errorDisplay.
+                errorDisplay.textContent = statusMessage;
+                errorDisplay.style.display = 'block';
+                loadingIndicator.style.color = 'red'; // Gör texten röd i loadingIndicator också
+            } else {
+                 loadingIndicator.style.color = ''; // Återställ textfärg
+                 clearGlobalError(); // Rensa globala fel om videostatus är ok
+            }
+        } else {
+            // Om inget meddelande och ingen spinner, dölj bara om det var ett videomeddelande
+            if (loadingIndicator.innerHTML.includes('video') || loadingIndicator.innerHTML.includes('Jobb ID')) {
+                 loadingIndicator.style.display = 'none';
+                 loadingIndicator.innerHTML = '';
+                 loadingIndicator.style.color = '';
+            }
+        }
+        loadingIndicator.onclick = null; // Ta bort eventuell gammal klickhanterare
+        loadingIndicator.style.cursor = 'default';
+    }
+
+
+    function resetUIState() {
         outputContainer.style.display = 'none';
         teacherColumn.style.display = 'none';
-        errorDisplay.style.display = 'none';
-        errorDisplay.textContent = '';
-        loadingIndicator.style.display = 'none';
+        clearGlobalError();
+        updateGlobalLoadingState(false);
+        
         downloadWordButton.style.display = 'none';
         getAnswersButton.style.display = 'none';
         promptOutputContainer.style.display = 'none';
@@ -37,35 +92,35 @@ document.addEventListener('DOMContentLoaded', () => {
         studentOutputDiv.innerHTML = '';
         teacherOutputDiv.innerHTML = '';
 
-        if (!isDownloadingVideo) { // Återställ inte dessa om videonedladdning pågår
-            generateButton.disabled = false;
-            generateButton.textContent = 'Generera elevfrågor';
-            if (generatePromptButton) {
-                generatePromptButton.disabled = false;
-                generatePromptButton.textContent = 'Generera prompt för AI';
-            }
+        generateButton.disabled = false;
+        generateButton.textContent = 'Generera elevfrågor';
+        if (generatePromptButton) {
+            generatePromptButton.disabled = false;
+            generatePromptButton.textContent = 'Generera prompt för AI';
         }
         getAnswersButton.disabled = false;
         getAnswersButton.textContent = 'Hämta facit';
-        if (downloadVideoBtn) { // NYTT
+        
+        // Återställ videonedladdningsknappen och rensa jobbinfo
+        if (downloadVideoBtn) {
             downloadVideoBtn.disabled = false;
             downloadVideoBtn.textContent = 'Hämta video';
         }
-        if (copyGeneratedPromptButton) {
-            const originalButtonText = "Kopiera texten";
-            if (copyGeneratedPromptButton.textContent !== originalButtonText) {
-                copyGeneratedPromptButton.textContent = originalButtonText;
-            }
+        if (pollIntervalId) {
+            clearInterval(pollIntervalId);
+            pollIntervalId = null;
         }
+        currentVideoJobId = null;
+        updateVideoDownloadStatusUI(''); // Rensa specifik videostatus
     }
 
-    resetUIState();
+    resetUIState(); // Initial återställning
 
     if (questionForm) {
         questionForm.addEventListener('submit', async function (event) {
             event.preventDefault();
-            generatedStudentQuestions = "";
-            resetUIState();
+            generatedStudentQuestions = ""; // Nollställ tidigare frågor
+            resetUIState(); 
 
             const mediaLink = mediaLinkInput.value;
             const numMcq = parseInt(mcqCountInput.value) || 0;
@@ -73,46 +128,35 @@ document.addEventListener('DOMContentLoaded', () => {
             const numDiscussion = parseInt(discussionCountInput.value) || 0;
 
             if (!mediaLink) {
-                errorDisplay.textContent = 'Ange en SVT Play- eller YouTube-länk.';
-                errorDisplay.style.display = 'block';
+                displayGlobalError('Ange en SVT Play- eller YouTube-länk.');
                 return;
             }
             if (numMcq < 0 || numShortAnswer < 0 || numDiscussion < 0) {
-                errorDisplay.textContent = 'Antal frågor kan inte vara negativt.';
-                errorDisplay.style.display = 'block';
+                displayGlobalError('Antal frågor kan inte vara negativt.');
                 return;
             }
             if (numMcq === 0 && numShortAnswer === 0 && numDiscussion === 0) {
-                errorDisplay.textContent = 'Ange minst en fråga för någon frågetyp.';
-                errorDisplay.style.display = 'block';
+                displayGlobalError('Ange minst en fråga för någon frågetyp.');
                 return;
             }
 
-            loadingIndicator.style.display = 'block';
-            loadingIndicator.textContent = 'Genererar elevfrågor, vänligen vänta... ';
-            const spinner = document.createElement('span');
-            spinner.className = 'spinner';
-            loadingIndicator.appendChild(spinner);
+            updateGlobalLoadingState(true, 'Genererar elevfrågor, vänligen vänta...');
             generateButton.disabled = true;
             generateButton.textContent = 'Genererar elevfrågor...';
             if (generatePromptButton) generatePromptButton.disabled = true;
-            if (downloadVideoBtn) downloadVideoBtn.disabled = true; // NYTT
+            if (downloadVideoBtn) downloadVideoBtn.disabled = true;
 
             try {
-                const response = await fetch('/generate-student-questions', {
+                const response = await fetch('/generate-student-questions', { /* ... som tidigare ... */ 
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         mediaLink,
-                        counts: {
-                            flerval: numMcq,
-                            kortsvar: numShortAnswer,
-                            diskussion: numDiscussion
-                        }
+                        counts: { flerval: numMcq, kortsvar: numShortAnswer, diskussion: numDiscussion }
                     })
                 });
                 if (!response.ok) {
-                    const errorData = await response.json().catch(() => ({ error: `Serverfel vid generering av elevfrågor: ${response.status}` }));
+                    const errorData = await response.json().catch(() => ({ error: `Serverfel vid generering: ${response.status}` }));
                     throw new Error(errorData.error || `Serverfel: ${response.status}`);
                 }
                 const result = await response.json();
@@ -121,44 +165,42 @@ document.addEventListener('DOMContentLoaded', () => {
                     studentOutputDiv.innerHTML = formatStudentTextForDisplay(generatedStudentQuestions);
                     outputContainer.style.display = 'flex';
                     getAnswersButton.style.display = 'block';
+                    clearGlobalError();
                 } else {
                     throw new Error('AI:n returnerade inget innehåll för elevfrågor.');
                 }
             } catch (error) {
                 console.error('Fel vid generering av elevfrågor:', error);
-                errorDisplay.textContent = `Fel: ${error.message}`;
-                errorDisplay.style.display = 'block';
+                displayGlobalError(`Fel: ${error.message}`);
             } finally {
-                loadingIndicator.style.display = 'none';
+                updateGlobalLoadingState(false);
                 generateButton.disabled = false;
                 generateButton.textContent = 'Generera elevfrågor';
                 if (generatePromptButton) generatePromptButton.disabled = false;
-                if (downloadVideoBtn) downloadVideoBtn.disabled = false; // NYTT
+                if (downloadVideoBtn) downloadVideoBtn.disabled = false;
             }
         });
     }
 
     if (getAnswersButton) {
         getAnswersButton.addEventListener('click', async function () {
+            // ... (liknande logik som i questionForm.addEventListener, använd updateGlobalLoadingState och displayGlobalError)
             if (!generatedStudentQuestions) {
                 alert("Inga elevfrågor att hämta facit för.");
                 return;
             }
-            teacherOutputDiv.innerHTML = '';
-            errorDisplay.style.display = 'none';
-            loadingIndicator.style.display = 'block';
-            loadingIndicator.textContent = 'Hämtar facit, vänligen vänta... ';
-            const spinner = document.createElement('span');
-            spinner.className = 'spinner';
-            loadingIndicator.appendChild(spinner);
+            teacherOutputDiv.innerHTML = ''; // Rensa tidigare facit
+            clearGlobalError();
+            updateGlobalLoadingState(true, 'Hämtar facit, vänligen vänta...');
             getAnswersButton.disabled = true;
             getAnswersButton.textContent = 'Hämtar facit...';
-            generateButton.disabled = true;
+            generateButton.disabled = true; // Inaktivera andra knappar
             if (generatePromptButton) generatePromptButton.disabled = true;
-            if (downloadVideoBtn) downloadVideoBtn.disabled = true; // NYTT
+            if (downloadVideoBtn) downloadVideoBtn.disabled = true;
+
 
             try {
-                const response = await fetch('/generate-teacher-answers', {
+                const response = await fetch('/generate-teacher-answers', { /* ... som tidigare ... */ 
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -175,349 +217,233 @@ document.addEventListener('DOMContentLoaded', () => {
                     teacherOutputDiv.innerHTML = formatTeacherTextForDisplay(result.teacherText);
                     teacherColumn.style.display = 'block';
                     downloadWordButton.style.display = 'block';
+                    clearGlobalError();
                 } else {
                     throw new Error('AI:n returnerade inget innehåll för facit.');
                 }
             } catch (error) {
                 console.error('Fel vid hämtning av facit:', error);
-                errorDisplay.textContent = `Fel vid hämtning av facit: ${error.message}`;
-                errorDisplay.style.display = 'block';
+                displayGlobalError(`Fel vid hämtning av facit: ${error.message}`);
             } finally {
-                loadingIndicator.style.display = 'none';
+                updateGlobalLoadingState(false);
                 getAnswersButton.disabled = false;
                 getAnswersButton.textContent = 'Hämta facit';
-                generateButton.disabled = false;
-                if (generatePromptButton) generatePromptButton.disabled = false;
-                if (downloadVideoBtn) downloadVideoBtn.disabled = false; // NYTT
+                // Återaktivera huvudknapparna om inga videoprocesser körs
+                if (!currentVideoJobId) { 
+                    generateButton.disabled = false;
+                    if (generatePromptButton) generatePromptButton.disabled = false;
+                    if (downloadVideoBtn) downloadVideoBtn.disabled = false;
+                }
             }
         });
     }
-
+    
     if (generatePromptButton) {
         generatePromptButton.addEventListener('click', async function () {
-            resetUIState();
+            // ... (liknande logik, använd updateGlobalLoadingState och displayGlobalError)
+            resetUIState(); // Återställ allt innan promptgenerering
             const mediaLink = mediaLinkInput.value;
             const numMcq = parseInt(mcqCountInput.value) || 0;
             const numShortAnswer = parseInt(shortAnswerCountInput.value) || 0;
             const numDiscussion = parseInt(discussionCountInput.value) || 0;
 
             if (!mediaLink) {
-                errorDisplay.textContent = 'Ange en SVT Play- eller YouTube-länk.';
-                errorDisplay.style.display = 'block';
+                displayGlobalError('Ange en SVT Play- eller YouTube-länk.');
                 return;
             }
-            if (numMcq < 0 || numShortAnswer < 0 || numDiscussion < 0) {
-                errorDisplay.textContent = 'Antal frågor kan inte vara negativt.';
-                errorDisplay.style.display = 'block';
-                return;
-            }
-            if (numMcq === 0 && numShortAnswer === 0 && numDiscussion === 0) {
-                errorDisplay.textContent = 'Ange minst en fråga för någon frågetyp för att generera en meningsfull prompt.';
-                errorDisplay.style.display = 'block';
-                return;
-            }
+            // ... (validering av counts som tidigare)
 
-            loadingIndicator.style.display = 'block';
-            loadingIndicator.textContent = 'Genererar prompt-text, vänligen vänta... ';
-            const spinner = document.createElement('span');
-            spinner.className = 'spinner';
-            loadingIndicator.appendChild(spinner);
+            updateGlobalLoadingState(true, 'Genererar prompt-text, vänligen vänta...');
             generatePromptButton.disabled = true;
             generatePromptButton.textContent = 'Genererar prompt...';
             generateButton.disabled = true;
-            if (downloadVideoBtn) downloadVideoBtn.disabled = true; // NYTT
-
+            if (downloadVideoBtn) downloadVideoBtn.disabled = true;
 
             try {
-                const response = await fetch('/generate-ai-prompt', {
+                const response = await fetch('/generate-ai-prompt', { /* ... som tidigare ... */ 
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         mediaLink,
-                        counts: {
-                            flerval: numMcq,
-                            kortsvar: numShortAnswer,
-                            diskussion: numDiscussion
-                        }
+                        counts: { flerval: numMcq, kortsvar: numShortAnswer, diskussion: numDiscussion }
                     })
                 });
                 if (!response.ok) {
-                    const errorData = await response.json().catch(() => ({ error: `Serverfel när prompt genererades: ${response.status}` }));
+                    const errorData = await response.json().catch(() => ({ error: `Serverfel när prompt genererades: ${response.status}`}));
                     throw new Error(errorData.error || `Serverfel: ${response.status}`);
                 }
                 const result = await response.json();
                 if (result.promptText) {
                     generatedPromptTextarea.value = result.promptText;
                     promptOutputContainer.style.display = 'block';
+                    clearGlobalError();
                 } else {
                     throw new Error('Servern returnerade ingen prompttext.');
                 }
             } catch (error) {
                 console.error('Fel vid generering av AI-prompt:', error);
-                errorDisplay.textContent = `Fel: ${error.message}`;
-                errorDisplay.style.display = 'block';
+                displayGlobalError(`Fel: ${error.message}`);
             } finally {
-                loadingIndicator.style.display = 'none';
+                updateGlobalLoadingState(false);
                 generatePromptButton.disabled = false;
                 generatePromptButton.textContent = 'Generera prompt för AI';
                 generateButton.disabled = false;
-                if (downloadVideoBtn) downloadVideoBtn.disabled = false; // NYTT
+                if (downloadVideoBtn) downloadVideoBtn.disabled = false;
             }
         });
     }
 
-    // NYTT: Event listener för "Hämta video"-knappen
+    // --- NY LOGIK FÖR ASYNKRON VIDEONEDLADDNING ---
     if (downloadVideoBtn) {
         downloadVideoBtn.addEventListener('click', async function () {
-            resetUIState(true); // Skicka true för att inte återställa "Generera frågor/prompt"-knapparna
-            const mediaLink = mediaLinkInput.value;
+            // Återställ bara videorelaterat UI, inte frågedelen om den är aktiv
+            if (pollIntervalId) clearInterval(pollIntervalId);
+            currentVideoJobId = null;
+            updateVideoDownloadStatusUI(''); // Rensa tidigare videostatus
+            clearGlobalError(); // Rensa eventuella globala fel
 
+            const mediaLink = mediaLinkInput.value;
             if (!mediaLink) {
-                errorDisplay.textContent = 'Ange en SVT Play- eller YouTube-länk för att kunna ladda ner videon.';
-                errorDisplay.style.display = 'block';
+                updateVideoDownloadStatusUI('Ange en media-länk för att ladda ner video.', true);
                 return;
             }
 
-            loadingIndicator.style.display = 'block';
-            loadingIndicator.textContent = 'Förbereder nedladdning av video, detta kan ta en stund... ';
-            const spinner = document.createElement('span');
-            spinner.className = 'spinner';
-            loadingIndicator.appendChild(spinner);
             downloadVideoBtn.disabled = true;
-            downloadVideoBtn.textContent = 'Hämtar video...';
-            // Inaktivera även andra huvudknappar under nedladdning
+            downloadVideoBtn.textContent = 'Initierar...';
+            updateVideoDownloadStatusUI('Förbereder nedladdning...', false, true);
+            // Inaktivera andra huvudknappar under nedladdningsprocessen
             generateButton.disabled = true;
             if (generatePromptButton) generatePromptButton.disabled = true;
 
 
             try {
-                const response = await fetch('/download-video', {
+                const response = await fetch('/initiate-video-download', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ mediaLink })
                 });
 
                 if (!response.ok) {
-                    const errorData = await response.json().catch(() => ({ error: `Serverfel vid videonedladdning: ${response.status}` }));
+                    const errorData = await response.json().catch(() => ({ error: `Serverfel vid initiering: ${response.status}` }));
                     throw new Error(errorData.error || `Serverfel: ${response.status}`);
                 }
 
-                // Hantera filnedladdningen
-                const disposition = response.headers.get('Content-Disposition');
-                let filename = 'video.mkv'; // Default filnamn
-                if (disposition && disposition.includes('attachment')) {
-                    const filenameMatch = disposition.match(/filename="?([^"]+)"?/);
-                    if (filenameMatch && filenameMatch[1]) {
-                        filename = filenameMatch[1];
-                    }
-                }
-
-                loadingIndicator.textContent = 'Laddar ner video...'; // Uppdatera meddelande
-
-                const blob = await response.blob();
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.style.display = 'none';
-                a.href = url;
-                a.download = filename;
-                document.body.appendChild(a);
-                a.click();
-                window.URL.revokeObjectURL(url);
-                document.body.removeChild(a);
-
-                loadingIndicator.textContent = 'Videonedladdning slutförd!';
-                setTimeout(() => { // Dölj meddelandet efter en stund
-                    if (loadingIndicator.textContent === 'Videonedladdning slutförd!') {
-                        loadingIndicator.style.display = 'none';
-                    }
-                }, 3000);
+                const result = await response.json();
+                currentVideoJobId = result.jobId;
+                updateVideoDownloadStatusUI(`Nedladdning påbörjad (ID: ${currentVideoJobId}). Kontrollerar status...`, false, true);
+                downloadVideoBtn.textContent = 'Pågår...';
+                
+                pollIntervalId = setInterval(checkVideoStatus, 5000); // Kolla var 5:e sekund
 
             } catch (error) {
-                console.error('Fel vid nedladdning av video:', error);
-                errorDisplay.textContent = `Fel vid videonedladdning: ${error.message}`;
-                errorDisplay.style.display = 'block';
-                loadingIndicator.style.display = 'none';
-            } finally {
-                // Återaktivera knappar efter nedladdningsförsök
+                console.error('Fel vid initiering av videonedladdning:', error);
+                updateVideoDownloadStatusUI(`Fel vid initiering: ${error.message}`, true);
                 downloadVideoBtn.disabled = false;
                 downloadVideoBtn.textContent = 'Hämta video';
-                generateButton.disabled = false; // Återaktivera alltid
-                if (generatePromptButton) generatePromptButton.disabled = false; // Återaktivera alltid
+                // Återaktivera andra knappar om initiering misslyckas
+                generateButton.disabled = false;
+                if (generatePromptButton) generatePromptButton.disabled = false;
             }
         });
+    }
+
+    async function checkVideoStatus() {
+        if (!currentVideoJobId) {
+            if (pollIntervalId) clearInterval(pollIntervalId);
+            return;
+        }
+
+        try {
+            const response = await fetch(`/video-download-status/${currentVideoJobId}`);
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ error: `Serverfel (${response.status})` }));
+                console.warn('Fel vid statuskontroll, avbryter polling för jobb:', currentVideoJobId, errorData.error);
+                updateVideoDownloadStatusUI(`Kunde inte hämta status: ${errorData.error || response.statusText}. Försök igen.`, true);
+                clearInterval(pollIntervalId);
+                pollIntervalId = null;
+                downloadVideoBtn.disabled = false;
+                downloadVideoBtn.textContent = 'Hämta video';
+                currentVideoJobId = null;
+                // Återaktivera andra knappar
+                generateButton.disabled = false;
+                if (generatePromptButton) generatePromptButton.disabled = false;
+                return;
+            }
+
+            const result = await response.json();
+            console.log('Status:', result);
+
+            if (result.status === 'completed') {
+                clearInterval(pollIntervalId);
+                pollIntervalId = null;
+                updateVideoDownloadStatusUI(`Video "${result.fileName || 'filen'}" är klar! Klicka för att ladda ner.`, false, false);
+                
+                loadingIndicator.onclick = () => { // Använd loadingIndicator som klickbar yta
+                    window.location.href = `/get-downloaded-video/${currentVideoJobId}`;
+                    // Återställ UI efter att användaren klickat (eller efter en timeout)
+                    setTimeout(() => {
+                        updateVideoDownloadStatusUI('');
+                        downloadVideoBtn.disabled = false;
+                        downloadVideoBtn.textContent = 'Hämta video';
+                        currentVideoJobId = null;
+                        // Återaktivera andra knappar
+                        generateButton.disabled = false;
+                        if (generatePromptButton) generatePromptButton.disabled = false;
+                    }, 2000);
+                };
+                loadingIndicator.style.cursor = 'pointer';
+                downloadVideoBtn.textContent = 'Färdig!';
+                downloadVideoBtn.disabled = false; // Gör huvudknappen klickbar igen också
+
+            } else if (result.status === 'failed') {
+                clearInterval(pollIntervalId);
+                pollIntervalId = null;
+                updateVideoDownloadStatusUI(`Nedladdning misslyckades: ${result.error || 'Okänt fel'}`, true);
+                downloadVideoBtn.disabled = false;
+                downloadVideoBtn.textContent = 'Hämta video (Försök igen)';
+                currentVideoJobId = null;
+                // Återaktivera andra knappar
+                generateButton.disabled = false;
+                if (generatePromptButton) generatePromptButton.disabled = false;
+
+            } else if (result.status === 'processing') {
+                updateVideoDownloadStatusUI('Videon bearbetas fortfarande på servern...', false, true);
+                downloadVideoBtn.textContent = 'Bearbetar...';
+            } else if (result.status === 'pending') {
+                updateVideoDownloadStatusUI('Väntar på att starta bearbetning...', false, true);
+                downloadVideoBtn.textContent = 'Väntar...';
+            }
+        } catch (error) {
+            console.error('Nätverksfel vid statuskontroll:', error);
+            // Behåll pollingen vid nätverksfel, men meddela användaren
+            updateVideoDownloadStatusUI('Nätverksfel vid statuskontroll. Försöker igen...', true, true);
+        }
     }
 
 
     if (copyGeneratedPromptButton) {
         copyGeneratedPromptButton.addEventListener('click', () => {
-            if (!generatedPromptTextarea.value) {
-                const originalButtonText = copyGeneratedPromptButton.textContent;
-                copyGeneratedPromptButton.textContent = 'Inget att kopiera';
-                setTimeout(() => {
-                    copyGeneratedPromptButton.textContent = originalButtonText;
-                }, 2000);
-                return;
-            }
+            // ... (din befintliga kopieringslogik)
+            if (!generatedPromptTextarea.value) { /* ... */ }
             generatedPromptTextarea.select();
-            generatedPromptTextarea.setSelectionRange(0, 99999);
-            try {
-                const successful = document.execCommand('copy');
-                const originalButtonText = copyGeneratedPromptButton.textContent;
-                const msg = successful ? 'Kopierad!' : 'Kunde inte kopiera';
-                copyGeneratedPromptButton.textContent = msg;
-                setTimeout(() => {
-                    copyGeneratedPromptButton.textContent = originalButtonText;
-                }, 2000);
-            } catch (err) {
-                const originalButtonText = copyGeneratedPromptButton.textContent;
-                copyGeneratedPromptButton.textContent = 'Fel vid kopiering';
-                setTimeout(() => {
-                    copyGeneratedPromptButton.textContent = originalButtonText;
-                }, 2000);
-            }
-            window.getSelection().removeAllRanges();
+            // ...
         });
     }
 
-    function formatTimestamp(rawTimestamp) {
-        if (!rawTimestamp || !rawTimestamp.includes('[')) return '';
-        let ts = rawTimestamp.trim();
-        // Försök matcha [hh:mm:ss] --> [hh:mm:ss] eller [mm:ss] --> [mm:ss] etc.
-        const intervalMatch = ts.match(/\[((?:\d{2,}:)?\d{2}:\d{2}(?:[,.]\d{1,3})?)\s*-->\s*((?:\d{2,}:)?\d{2}:\d{2}(?:[,.]\d{1,3})?)\]/);
-        if (intervalMatch) {
-            let startStr = intervalMatch[1];
-            let endStr = intervalMatch[2];
-            // Förenkla om timmar är 00
-            startStr = startStr.replace(/^(00:)+/, '');
-            endStr = endStr.replace(/^(00:)+/, '');
-            if (startStr === endStr) return `[${startStr}]`; // Om start och slut är samma, visa bara en gång
-            return `[${startStr} - ${endStr}]`;
-        }
-        // Försök matcha enskild tidsstämpel [hh:mm:ss] eller [mm:ss]
-        const singleMatch = ts.match(/\[((?:\d{2,}:)?\d{2}:\d{2}(?:[,.]\d{1,3})?)\]/);
-        if (singleMatch) {
-            let timeStr = singleMatch[1];
-            timeStr = timeStr.replace(/^(00:)+/, '');
-            return `[${timeStr}]`;
-        }
-        if (ts.startsWith("[") && ts.endsWith("]")) { // Fallback om det är något annat inom [ ]
-            return ts;
-        }
-        return ''; // Returnera tom sträng om inget känns igen
-    }
-
-
+    // Behåll dina formatStudentTextForDisplay och formatTeacherTextForDisplay funktioner
     function formatStudentTextForDisplay(text) {
         if (!text || text.trim() === '') return '<p>Inga frågor att visa.</p>';
-        if (text.includes("KUNDE INTE EXTRAHERAS")) return `<p style="color: red;">${text.replace(/\n/g, '<br>')}</p>`;
-
-        // Använd en mer "rå" rendering tills vidare om AI:n sköter formateringen väl
         return `<pre style="white-space: pre-wrap; word-wrap: break-word;">${text}</pre>`;
     }
 
     function formatTeacherTextForDisplay(text) {
         if (!text || text.trim() === '') return '<p>Inget facit att visa.</p>';
-        if (text.includes("KUNDE INTE EXTRAHERAS")) return `<p style="color: red;">${text.replace(/\n/g, '<br>')}</p>`;
-
-        // Använd en mer "rå" rendering tills vidare
         return `<pre style="white-space: pre-wrap; word-wrap: break-word;">${text}</pre>`;
     }
-
+    
     if (downloadWordButton) {
         downloadWordButton.addEventListener('click', function () {
-            let studentHtmlForDoc = studentOutputDiv.innerHTML; // Tar nu innehållet i <pre>
-            let teacherHtmlForDoc = teacherColumn.style.display !== 'none' ? teacherOutputDiv.innerHTML : "";
-
-            // Funktion för att konvertera <pre>-formaterad text till HTML som ser bra ut i Word
-            function preToWordHtml(preContent) {
-                if (!preContent.startsWith('<pre')) return preContent; // Om det inte är pre, returnera som det är
-                let text = preContent.replace(/<pre[^>]*>/i, '').replace(/<\/pre>/i, ''); // Ta bort <pre>-taggar
-                text = text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'); // Avkoda HTML-entiteter
-
-                // Dela upp i frågeblock baserat på numrering
-                const questionBlocks = text.split(/\n(?=\s*\d+\.\s)/m);
-                let html = '';
-
-                questionBlocks.forEach(block => {
-                    if (block.trim() === '') return;
-                    html += '<div style="margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px dashed #ccc; page-break-inside: avoid;">';
-                    const lines = block.trim().split('\n');
-                    html += `<p style="font-weight: bold; margin-bottom: 6px;">${lines[0]}</p>`; // Frågerad
-
-                    if (lines.length > 1) {
-                        let isMcq = lines.slice(1).some(l => l.match(/^\s*[A-D][.)]\s+/i));
-                        if (isMcq) {
-                            html += '<ul style="list-style-type: none; padding-left: 20px; margin-top: 4px; margin-bottom: 8px;">';
-                            lines.slice(1).forEach(line => {
-                                if (line.match(/^\s*[A-D][.)]\s+/i)) {
-                                    html += `<li style="margin-bottom: 3px;">${line.trim()}</li>`;
-                                } else if (line.trim().toLowerCase().startsWith('rätt svar:') || line.trim().toLowerCase().startsWith('svar:') || line.trim().toLowerCase().startsWith('förslag på svar:')) {
-                                    // Detta är för facit, hanteras nedan om teacherHtmlForDoc
-                                }
-                            });
-                            html += '</ul>';
-                        }
-                        // Hantera svarstext för facitdelen
-                        if (teacherHtmlForDoc && preContent === teacherOutputDiv.innerHTML) { // Endast för lärarversionens block
-                            lines.slice(1).forEach(line => {
-                                const trimmedLine = line.trim();
-                                if (trimmedLine.toLowerCase().startsWith('rätt svar:') || trimmedLine.toLowerCase().startsWith('svar:') || trimmedLine.toLowerCase().startsWith('förslag på svar:')) {
-                                    html += `<p style="margin-top: 6px;"><strong>${trimmedLine.substring(0, trimmedLine.indexOf(':') + 1)}</strong>${trimmedLine.substring(trimmedLine.indexOf(':') + 1)}</p>`;
-                                }
-                            });
-                        }
-                    }
-                    html += '</div>';
-                });
-                return html;
-            }
-
-
-            studentHtmlForDoc = preToWordHtml(studentOutputDiv.innerHTML);
-            if (teacherHtmlForDoc) {
-                teacherHtmlForDoc = preToWordHtml(teacherOutputDiv.innerHTML);
-            }
-
-
-            if (!studentHtmlForDoc.includes('<p')) { // Enkel kontroll om det finns formaterat innehåll
-                alert('Det finns inga frågor att ladda ner (eller fel vid formatering).');
-                return;
-            }
-
-            const mediaLinkValue = mediaLinkInput.value;
-            const programTitle = mediaLinkValue.split('/').filter(Boolean).pop()?.split('?')[0] || "Okant_Program";
-
-            let htmlContent = `
-                <!DOCTYPE html>
-                <html lang="sv">
-                <head>
-                    <meta charset="UTF-8">
-                    <title>Instuderingsfrågor - ${programTitle}</title>
-                    <style>
-                        body { font-family: Calibri, Arial, sans-serif; line-height: 1.5; margin: 20px; font-size: 11pt; }
-                        h1 { font-size: 16pt; color: #2E74B5; margin-bottom: 10px; }
-                        h2 { font-size: 14pt; color: #2E74B5; margin-top: 20px; margin-bottom: 10px; border-bottom: 1px solid #AEB6BF; padding-bottom: 3px;}
-                        /* Ta bort generell div > div styling och lita på preToWordHtml's styling */
-                    </style>
-                </head>
-                <body>
-                    <h1>Instuderingsfrågor för: ${programTitle}</h1>
-                    <div><h2>📘 Elevversion – Instuderingsfrågor (utan svar)</h2>${studentHtmlForDoc}</div>
-                    ${teacherHtmlForDoc ?
-                    `<hr style="margin-top: 25px; margin-bottom: 25px; border: none; border-top: 1px solid #AEB6BF;">
-                         <div><h2>👩‍🏫 Lärarversion – Med facit</h2>${teacherHtmlForDoc}</div>`
-                    : ''}
-                </body>
-                </html>`;
-
-            const blob = new Blob([htmlContent], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document;charset=utf-8' });
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = `Instuderingsfrågor - ${programTitle.replace(/[\\/:*?"<>|]/g, '_')}.docx`;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            URL.revokeObjectURL(link.href);
+            // ... (din befintliga Word-nedladdningslogik) ...
         });
     }
 });
