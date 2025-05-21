@@ -3,12 +3,14 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 const express = require('express');
-const { exec, execFile } = require('child_process');
+const { execFile } = require('child_process'); // execFile är tillräckligt
 const fs = require('fs').promises;
+const fsc = require('fs'); // Importera synkrona fs för existsSync
 const path = require('path');
 const os = require('os');
 const axios = require('axios');
 const FormData = require('form-data');
+const crypto = require('crypto'); // För unika jobb-ID
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -21,26 +23,44 @@ const NOVITA_STT_API_ENDPOINT = process.env.NOVITA_STT_API_ENDPOINT;
 const NOVITA_WHISPER_MODEL_NAME = process.env.NOVITA_WHISPER_MODEL_NAME;
 
 if (!NOVITA_API_KEY || !NOVITA_API_ENDPOINT || !NOVITA_MODEL_NAME) {
-    console.error("VARNING: Novita.ai API-konfiguration (LLM) är inte fullständigt satt i .env-filen.");
+    console.warn("VARNING: Novita.ai API-konfiguration (LLM) är inte fullständigt satt i .env-filen.");
+}
+if (!NOVITA_STT_API_ENDPOINT || !NOVITA_API_KEY || !NOVITA_WHISPER_MODEL_NAME) {
+    console.warn("VARNING: Novita.ai STT API-konfiguration är inte fullständigt satt. STT-funktionalitet kan misslyckas.");
 }
 
+
+// Globalt objekt för att lagra jobbstatus (in-memory)
+const videoDownloadJobs = {};
+/*
+  Struktur för videoDownloadJobs:
+  jobId: {
+    status: 'pending' | 'processing' | 'completed' | 'failed',
+    mediaLink: '...',
+    filePath: '...' (när klar),
+    fileName: '...' (när klar),
+    error: '...' (om misslyckat),
+    createdAt: Date,
+    updatedAt: Date,
+  }
+*/
+
 app.use(express.json({ limit: '5mb' }));
-app.use(express.static(path.join(__dirname)));
+app.use(express.static(path.join(__dirname))); // Serverar index.html, script.js, styles.css
 
 // --- HJÄLPFUNKTIONER ---
-// (isValidUrl, execFilePromise, callNovitaSttApi, getSrtFile, 
-//  parseAndSlimSrt, deduplicateSlimmedSrt, callNovitaAI, 
-//  sanitizeAiGeneratedText, systemMessageForStudentQuestions, buildStrictStudentPrompt
-//  ska finnas här - se tidigare svar för deras fullständiga definitioner)
-
 function isValidUrl(url) {
     if (!url || typeof url !== 'string' || url.trim() === '') return false;
     try {
         const parsedUrl = new URL(url);
         const hostname = parsedUrl.hostname.toLowerCase();
+        // Acceptera även youtube.com och youtu.be direkt
         return hostname.includes('svtplay.se') ||
             hostname.includes('urplay.se') ||
             hostname.includes('youtube.com') ||
+            hostname.includes('youtu.be') ||
+            hostname.includes('youtube-nocookie.com') ||
+            hostname.includes('youtube.com') || // För Android-delningslänkar
             hostname.includes('youtu.be');
     } catch (e) {
         return false;
@@ -48,19 +68,44 @@ function isValidUrl(url) {
 }
 
 const execFilePromise = (command, args, options) => {
-    return new Promise((resolveExec) => {
-        execFile(command, args, options, (error, stdout, stderr) => {
-            if (stdout) console.log(`${command} stdout:\n${stdout}`);
-            if (stderr &&
-                !stderr.toLowerCase().includes("ignoring unsupported parameter") &&
-                !stderr.toLowerCase().includes("default srt subtitles not found") &&
-                !stderr.toLowerCase().includes("automatic subtitles not found")) {
-                console.warn(`${command} stderr:\n${stderr}`);
+    return new Promise((resolveExec, rejectExec) => {
+        console.log(`Executing: ${command} ${args.join(' ')}`);
+        const child = execFile(command, args, options, (error, stdout, stderr) => {
+            if (error) {
+                console.error(`\n--- ${command} execFile error ---`);
+                console.error(`Message: ${error.message}`);
+                console.error(`Code: ${error.code}`);
+                if (error.stderr) console.error(`Stderr (from error obj):\n${error.stderr}`);
+                if (error.stdout) console.error(`Stdout (from error obj):\n${error.stdout}`);
+                
+                // Attach stderr and stdout to the error object if not already present
+                error.stderr = error.stderr || stderr;
+                error.stdout = error.stdout || stdout;
+                return rejectExec(error);
             }
-            resolveExec({ error, stdout, stderr });
+            // Logga stdout och stderr även vid framgång, för felsökning av varningsmeddelanden etc.
+            if (stdout) console.log(`\n--- ${command} stdout (success) ---\n${stdout}`);
+            if (stderr) { // Logga all stderr, men som info/warn om det inte är ett fel.
+                 console.log(`\n--- ${command} stderr (success/info) ---\n${stderr}`);
+            }
+            resolveExec({ stdout, stderr }); // error-objektet är null här
+        });
+
+        child.on('spawn', () => {
+            console.log(`Process ${command} (PID: ${child.pid}) spawned.`);
+        });
+        child.on('exit', (code, signal) => {
+            console.log(`Process ${command} (PID: ${child.pid}) exited with code ${code}${signal ? ` and signal ${signal}` : ''}.`);
+        });
+        child.on('error', (spawnError) => { // För fel vid själva spawn (t.ex. ENOENT)
+            console.error(`\n--- ${command} spawn error ---`);
+            console.error(`Message: ${spawnError.message}`);
+            console.error(`Code: ${spawnError.code}`);
+            rejectExec(spawnError);
         });
     });
 };
+
 
 async function callNovitaSttApi(audioFilePath, language = 'sv') {
     const effectiveSttEndpoint = NOVITA_STT_API_ENDPOINT || 'https://api.novita.ai/v2/stt';
@@ -69,7 +114,7 @@ async function callNovitaSttApi(audioFilePath, language = 'sv') {
     if (!NOVITA_API_KEY) {
         throw new Error("Novita.ai API-nyckel (NOVITA_API_KEY) är inte satt i .env-filen.");
     }
-    if (!require('fs').existsSync(audioFilePath)) {
+    if (!fsc.existsSync(audioFilePath)) {
         throw new Error(`Ljudfilen kunde inte hittas: ${audioFilePath}`);
     }
     if (!NOVITA_STT_API_ENDPOINT) {
@@ -80,7 +125,7 @@ async function callNovitaSttApi(audioFilePath, language = 'sv') {
     console.log(`Anropar Novita.ai STT API (${effectiveSttEndpoint}) för fil: ${audioFilePath} med modell ${effectiveWhisperModel}`);
 
     const formData = new FormData();
-    formData.append('file', require('fs').createReadStream(audioFilePath));
+    formData.append('file', fsc.createReadStream(audioFilePath));
     formData.append('model_name', effectiveWhisperModel);
     formData.append('language', language);
     formData.append('response_format', 'srt');
@@ -91,7 +136,7 @@ async function callNovitaSttApi(audioFilePath, language = 'sv') {
                 ...formData.getHeaders(),
                 'Authorization': `Bearer ${NOVITA_API_KEY}`,
             },
-            timeout: 1800000,
+            timeout: 1800000, // 30 min timeout
         });
 
         if (response.data) {
@@ -121,7 +166,7 @@ async function callNovitaSttApi(audioFilePath, language = 'sv') {
                         const start = formatSrtTimestamp(segment.start);
                         const end = formatSrtTimestamp(segment.end);
                         let segmentText = segment.text.trim();
-                        const MAX_LINE_LENGTH = 42;
+                        const MAX_LINE_LENGTH = 42; // Standard SRT maxlängd
                         let lines = [];
                         while (segmentText.length > MAX_LINE_LENGTH) {
                             let breakPoint = segmentText.lastIndexOf(' ', MAX_LINE_LENGTH);
@@ -145,7 +190,7 @@ async function callNovitaSttApi(audioFilePath, language = 'sv') {
                 console.warn("Novita STT returnerade bara text, använder dummy-tidsstämpel.");
                 return `1\n00:00:00,000 --> 00:01:00,000\n${response.data.text.trim()}\n\n`;
             } else if (response.data.transcript) {
-                console.warn("Novita STT returnerade 'transcript', använder dummy-tidsstämpel.");
+                 console.warn("Novita STT returnerade 'transcript', använder dummy-tidsstämpel.");
                 return `1\n00:00:00,000 --> 00:01:00,000\n${response.data.transcript.trim()}\n\n`;
             }
             console.log('Novita.ai STT API svar (okänt format):', JSON.stringify(response.data, null, 2));
@@ -161,188 +206,181 @@ async function callNovitaSttApi(audioFilePath, language = 'sv') {
 }
 
 async function getSrtFile(mediaLink) {
-    // ... (befintlig funktion) ...
     if (!isValidUrl(mediaLink)) {
         throw new Error('Ogiltig eller ej stödd media-länk i getSrtFile.');
     }
 
     const parsedUrl = new URL(mediaLink);
     const hostname = parsedUrl.hostname.toLowerCase();
-    const isYoutube = hostname.includes('youtube.com') || hostname.includes('youtu.be');
+    const isYoutube = hostname.includes('youtube.com') || hostname.includes('youtu.be') || hostname.includes('youtube-nocookie.com') || hostname.includes('youtube.com');
 
     const uniqueFileId = Date.now();
-    const uniqueFileNameBaseNoExt = path.join(os.tmpdir(), `media_temp_${uniqueFileId}`);
+    const tempDir = os.tmpdir();
+    const uniqueFileNameBaseNoExt = path.join(tempDir, `media_temp_subs_${uniqueFileId}`);
+    // Skapa mappen för att säkerställa att yt-dlp kan skriva dit
+    await fs.mkdir(uniqueFileNameBaseNoExt, { recursive: true }).catch(e => console.warn(`Kunde inte skapa mapp för undertexter: ${uniqueFileNameBaseNoExt}`, e));
+
 
     let srtDownloaderCommand;
     let srtDownloaderArgs;
+    let srtFilePathToCheck; // Vi behöver veta exakt var filen hamnar
 
     if (isYoutube) {
-        srtDownloaderCommand = 'yt-dlp';
+        srtDownloaderCommand = '/opt/venv/bin/yt-dlp'; // Absolut sökväg
+        srtFilePathToCheck = `${uniqueFileNameBaseNoExt}.sv.srt`; // yt-dlp kommer att skapa en fil med språkkod
         srtDownloaderArgs = [
-            '--no-warnings',
-            '--write-sub', '--write-auto-sub',
-            '--convert-subs', 'srt',
-            '--sub-langs', 'sv.*,en.*',
-            '--sub-format', 'srt/vtt/best',
-            '--skip-download',
-            '-o', `${uniqueFileNameBaseNoExt}.%(ext)s`,
+            '--no-warnings', '--write-sub', '--write-auto-sub', '--convert-subs', 'srt',
+            '--sub-langs', 'sv.*,en.*', // Prioritera svenska, sedan engelska
+            '--sub-format', 'srt/vtt/best', '--skip-download',
+            // Viktigt: -o specificerar output template. Eftersom vi skapar mappen uniqueFileNameBaseNoExt,
+            // och yt-dlp skapar filnamn baserat på videons titel, måste vi peka outputen *inuti* den mappen.
+            // Vi låter yt-dlp skapa filnamnet baserat på videons titel, men i den specificerade mappen.
+            '-o', path.join(uniqueFileNameBaseNoExt, '%(title)s.%(ext)s'), // Lägger till %(title)s.%(ext)s
             mediaLink
         ];
-    } else {
-        srtDownloaderCommand = 'svtplay-dl';
+        console.log(`Försöker hämta YT undertexter. Förväntar mig fil i mappen: ${uniqueFileNameBaseNoExt}`);
+    } else { // SVT/UR
+        srtDownloaderCommand = '/opt/venv/bin/svtplay-dl'; // Absolut sökväg
         srtDownloaderArgs = [
             '-S', '--force-subtitle',
-            '-o', uniqueFileNameBaseNoExt,
+            // svtplay-dl kommer att skapa filen *i* mappen uniqueFileNameBaseNoExt
+            '-o', uniqueFileNameBaseNoExt, // Output till mappen, svtplay-dl sköter filnamnet
             mediaLink
         ];
+        console.log(`Försöker hämta SVT/UR undertexter. Filer hamnar i: ${uniqueFileNameBaseNoExt}`);
     }
 
-    console.log(`Försöker hämta undertexter med: ${srtDownloaderCommand} ${srtDownloaderArgs.join(' ')}`);
+    console.log(`Hämtar undertexter med: ${srtDownloaderCommand} ${srtDownloaderArgs.join(' ')}`);
+    await execFilePromise(srtDownloaderCommand, srtDownloaderArgs, { timeout: 180000 }); // 3 min timeout
 
-    await execFilePromise(srtDownloaderCommand, srtDownloaderArgs, { timeout: 120000 });
-
-    const tempDir = os.tmpdir();
-    let filesInTemp = await fs.readdir(tempDir);
-    const downloadedSrtFile = filesInTemp.find(f =>
-        f.startsWith(path.basename(uniqueFileNameBaseNoExt)) && f.endsWith('.srt')
-    );
+    // Leta efter .srt-filen i den skapade mappen
+    const filesInOutputDir = await fs.readdir(uniqueFileNameBaseNoExt).catch(() => []);
+    let downloadedSrtFile = filesInOutputDir.find(f => f.endsWith('.srt'));
 
     if (downloadedSrtFile) {
-        const finalSrtPath = path.join(tempDir, downloadedSrtFile);
+        const finalSrtPath = path.join(uniqueFileNameBaseNoExt, downloadedSrtFile);
         console.log(`Hittade nedladdad SRT-fil: ${finalSrtPath}`);
         try {
             const srtFileData = await fs.readFile(finalSrtPath, 'utf-8');
-            await fs.unlink(finalSrtPath).catch(e => console.warn(`Kunde inte radera temporär SRT-fil: ${finalSrtPath}`, e));
             if (srtFileData && srtFileData.trim() !== '') {
                 console.log("Undertexter hämtade direkt.");
+                await fs.rm(uniqueFileNameBaseNoExt, { recursive: true, force: true }).catch(e => console.warn(`Kunde inte radera temp-mapp för undertexter (1): ${uniqueFileNameBaseNoExt}`, e));
                 return srtFileData;
             }
             console.log("Nedladdad SRT-fil var tom.");
         } catch (fileError) {
-            console.warn(`Fel vid läsning/radering av nedladdad SRT-fil: ${fileError.message}. Fortsätter för ev. transkribering.`);
+            console.warn(`Fel vid läsning av nedladdad SRT-fil: ${fileError.message}. Fortsätter.`);
         }
     }
-
+    
+    // Om ingen SRT hittades direkt, och det är YouTube, försök STT
     if (isYoutube && NOVITA_STT_API_ENDPOINT && NOVITA_API_KEY) {
-        console.log("Inga befintliga undertexter hittades eller filen var tom för YouTube-länk. Försöker transkribera ljud via Novita.ai STT...");
-
-        const audioFileBase = `${uniqueFileNameBaseNoExt}_audio`;
-
-        const audioDlCommand = 'yt-dlp';
+        console.log("Inga befintliga undertexter hittades för YouTube-länk. Försöker transkribera ljud via Novita.ai STT...");
+        const audioFileOutputDir = path.join(tempDir, `media_temp_audio_${uniqueFileId}`);
+        await fs.mkdir(audioFileOutputDir, { recursive: true }).catch(e => console.warn(`Kunde inte skapa mapp för ljud: ${audioFileOutputDir}`, e));
+        
+        const audioDlCommand = '/opt/venv/bin/yt-dlp'; // Absolut sökväg
         const audioDlArgs = [
-            '--no-warnings', '-x', '-f', 'bestaudio',
-            '--audio-format', 'wav',
-            '-o', `${audioFileBase}.%(ext)s`,
+            '--no-warnings', '-x', '-f', 'bestaudio', '--audio-format', 'wav',
+            '-o', path.join(audioFileOutputDir, '%(title)s.%(ext)s'), // Output audio till sin egen mapp
             mediaLink
         ];
 
         console.log(`Laddar ner ljud: ${audioDlCommand} ${audioDlArgs.join(' ')}`);
-        const { error: audioErrorDl } = await execFilePromise(audioDlCommand, audioDlArgs, { timeout: 300000 });
+        await execFilePromise(audioDlCommand, audioDlArgs, { timeout: 600000 }); // 10 min timeout
 
-        filesInTemp = await fs.readdir(tempDir);
-        const actualAudioFile = filesInTemp.find(f => f.startsWith(path.basename(audioFileBase)) && (f.endsWith('.wav') || f.endsWith('.mp3') || f.endsWith('.m4a')));
+        const audioFiles = await fs.readdir(audioFileOutputDir).catch(() => []);
+        const actualAudioFile = audioFiles.find(f => f.endsWith('.wav'));
 
         if (!actualAudioFile) {
-            let errorMsg = `Ljudfil ${audioFileBase}.* kunde inte hittas efter nedladdningsförsök.`;
-            if (audioErrorDl) errorMsg += ` Nedladdningsfel: ${audioErrorDl.message}`;
-            console.error(errorMsg);
-            const otherFiles = filesInTemp.filter(f => f.startsWith(path.basename(audioFileBase)));
-            for (const f of otherFiles) { await fs.unlink(path.join(tempDir, f)).catch(() => { }); }
-            throw new Error(errorMsg);
+            await fs.rm(uniqueFileNameBaseNoExt, { recursive: true, force: true }).catch(() => {});
+            await fs.rm(audioFileOutputDir, { recursive: true, force: true }).catch(() => {});
+            throw new Error(`Ljudfil .wav kunde inte hittas efter nedladdningsförsök i ${audioFileOutputDir}.`);
         }
-        const audioFilePath = path.join(tempDir, actualAudioFile);
+        const audioFilePath = path.join(audioFileOutputDir, actualAudioFile);
 
-        console.log(`Ljudfil nedladdad till: ${audioFilePath}. Startar transkribering via Novita.ai STT API...`);
+        console.log(`Ljudfil nedladdad till: ${audioFilePath}. Startar transkribering...`);
         try {
             const transcribedSrtData = await callNovitaSttApi(audioFilePath, 'sv');
-            await fs.unlink(audioFilePath).catch(e => console.warn(`Kunde inte radera ljudfil: ${audioFilePath}`, e));
             console.log("Transkribering via Novita.ai STT lyckades.");
+            await fs.rm(uniqueFileNameBaseNoExt, { recursive: true, force: true }).catch(() => {});
+            await fs.rm(audioFileOutputDir, { recursive: true, force: true }).catch(() => {});
             return transcribedSrtData;
         } catch (sttError) {
-            await fs.unlink(audioFilePath).catch(e => console.warn(`Kunde inte radera ljudfil (efter STT-fel): ${audioFilePath}`, e));
             console.error(`Fel vid transkribering via Novita.ai STT: ${sttError.message}`);
+            await fs.rm(uniqueFileNameBaseNoExt, { recursive: true, force: true }).catch(() => {});
+            await fs.rm(audioFileOutputDir, { recursive: true, force: true }).catch(() => {});
             throw new Error(`Transkribering via Novita.ai STT misslyckades: ${sttError.message}`);
         }
-    } else if (isYoutube) {
-        console.log("Inga undertexter för YouTube, och Novita STT API är inte konfigurerat (NOVITA_STT_API_ENDPOINT och/eller NOVITA_API_KEY saknas i .env). Kan inte transkribera.");
-        throw new Error('Inga undertexter hittades och STT-tjänsten är inte (fullständigt) konfigurerad.');
     }
-    else {
-        console.log("Inga undertexter hittades (och inte YouTube för STT-försök).");
+
+    await fs.rm(uniqueFileNameBaseNoExt, { recursive: true, force: true }).catch(e => console.warn(`Kunde inte radera temp-mapp för undertexter (final): ${uniqueFileNameBaseNoExt}`, e));
+    if (isYoutube) {
+         throw new Error('Inga undertexter hittades och STT-tjänsten är inte (fullständigt) konfigurerad eller misslyckades.');
+    } else {
         throw new Error('Inga undertexter kunde hittas eller genereras för denna media.');
     }
 }
 
 function parseAndSlimSrt(srtData) {
-    // ... (befintlig funktion)
-    let srtContentToParse = srtData.replace(/\r\n/g, '\n');
-    if (srtContentToParse.charCodeAt(0) === 0xFEFF) {
+    let srtContentToParse = srtData.replace(/\r\n/g, '\n'); // Normalisera radbrytningar
+    if (srtContentToParse.charCodeAt(0) === 0xFEFF) { // Ta bort BOM
         srtContentToParse = srtContentToParse.substring(1);
     }
 
-    const blocks = srtContentToParse.split(/\n\n+/);
+    const blocks = srtContentToParse.split(/\n\n+/); // Dela upp i block
     let slimmedSrt = "";
     for (const block of blocks) {
-        if (block.trim() === "") continue;
+        if (block.trim() === "") continue; // Hoppa över tomma block
+
         const lines = block.trim().split('\n');
         let timeLineIndex = -1;
-        for (let i = 0; i < lines.length; i++) {
+        for (let i = 0; i < lines.length; i++) { // Hitta tidslinjen
             if (lines[i].includes('-->')) {
                 timeLineIndex = i;
                 break;
             }
         }
-        if (timeLineIndex === -1) {
-            if (blocks.length === 1 && lines.length > 0 && lines[0].trim() !== "") {
+
+        if (timeLineIndex === -1) { // Om ingen tidslinje, logga och hoppa över (eller hantera som text om det är enda blocket)
+             if (blocks.length === 1 && lines.length > 0 && lines[0].trim() !== "") {
                 const textContent = lines.join('\n').trim();
                 if (textContent) {
                     console.warn("SRT-block saknar tidsstämpel, använder dummy-tid för hela blocket:", block.substring(0, 100));
                     slimmedSrt += `[00:00] --> [00:00]\n${textContent}\n\n`;
                 }
             } else {
-                console.warn("SRT-block saknar '-->' tidslinje:", lines.join(' | ').substring(0, 100));
+                console.warn("SRT-block saknar '-->' tidslinje:", lines.join(' | ').substring(0,100));
             }
             continue;
         }
+        
+        // Försök parsa tidsformat hh:mm:ss,mmm eller mm:ss,mmm eller ss,mmm
+        const timeMatch = lines[timeLineIndex].match(/(\d{1,2}:)?(\d{1,2}:\d{2}[,.]\d{3})\s*-->\s*(\d{1,2}:)?(\d{1,2}:\d{2}[,.]\d{3})/);
 
-        const timeMatch = lines[timeLineIndex].match(/(\d{2,}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2,}):(\d{2}):(\d{2})[,.](\d{3})/);
-        let shortTimeMatch = null;
-        if (!timeMatch) {
-            shortTimeMatch = lines[timeLineIndex].match(/(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2})[,.](\d{3})/);
-        }
+        if (timeMatch) {
+            let startStr = timeMatch[1] ? timeMatch[1] + timeMatch[2] : timeMatch[2]; // Inkludera timmar om de finns
+            let endStr = timeMatch[3] ? timeMatch[3] + timeMatch[4] : timeMatch[4];
 
-        if (timeMatch || shortTimeMatch) {
-            let startHour = "00", startMinute, startSecond, endHour = "00", endMinute, endSecond;
-            if (timeMatch) {
-                startHour = timeMatch[1];
-                startMinute = timeMatch[2];
-                startSecond = timeMatch[3];
-                endHour = timeMatch[5];
-                endMinute = timeMatch[6];
-                endSecond = timeMatch[7];
-            } else {
-                startMinute = shortTimeMatch[1];
-                startSecond = shortTimeMatch[2];
-                endMinute = shortTimeMatch[4];
-                endSecond = shortTimeMatch[5];
-            }
-
-            let formattedStartTime;
-            if (startHour === "00" || parseInt(startHour, 10) === 0) {
-                formattedStartTime = `${String(startMinute).padStart(2, '0')}:${String(startSecond).padStart(2, '0')}`;
-            } else {
-                formattedStartTime = `${String(startHour).padStart(2, '0')}:${String(startMinute).padStart(2, '0')}:${String(startSecond).padStart(2, '0')}`;
-            }
-
-            let formattedEndTime;
-            if (endHour === "00" || parseInt(endHour, 10) === 0) {
-                formattedEndTime = `${String(endMinute).padStart(2, '0')}:${String(endSecond).padStart(2, '0')}`;
-            } else {
-                formattedEndTime = `${String(endHour).padStart(2, '0')}:${String(endMinute).padStart(2, '0')}:${String(endSecond).padStart(2, '0')}`;
-            }
+            // Förenkla formatet till [mm:ss] eller [hh:mm:ss]
+            const formatShortTime = (timeStrWithMs) => {
+                const parts = timeStrWithMs.split(/[:,.]/); // Dela vid :, . eller ,
+                let h = "00", m = "00", s = "00";
+                if (parts.length === 4) { // hh:mm:ss,ms
+                    [h, m, s] = parts.slice(0,3);
+                } else if (parts.length === 3) { // mm:ss,ms
+                    [m, s] = parts.slice(0,2);
+                } else if (parts.length === 2) { // ss,ms - mindre troligt men för säkerhets skull
+                    s = parts[0];
+                }
+                return (parseInt(h,10) > 0 ? `${h.padStart(2,'0')}:` : '') + `${m.padStart(2,'0')}:${s.padStart(2,'0')}`;
+            };
+            
+            const formattedStartTime = formatShortTime(startStr);
+            const formattedEndTime = formatShortTime(endStr);
 
             const textContent = lines.slice(timeLineIndex + 1).join('\n').trim();
-            if (textContent) {
+            if (textContent) { // Lägg bara till om det finns text
                 slimmedSrt += `[${formattedStartTime}] --> [${formattedEndTime}]\n${textContent}\n\n`;
             }
         } else {
@@ -353,18 +391,18 @@ function parseAndSlimSrt(srtData) {
 }
 
 function deduplicateSlimmedSrt(slimmedSrtString) {
-    // ... (befintlig funktion)
     if (!slimmedSrtString || slimmedSrtString.trim() === "") {
         return "";
     }
     const entries = [];
     const rawBlocks = slimmedSrtString.trim().split(/\n\n+/);
 
+    // Steg 1: Parsa blocken till en strukturerad lista
     for (const block of rawBlocks) {
         const lines = block.split('\n');
         if (lines.length < 2 || !lines[0].includes("-->")) {
-            console.warn("Deduplicate: Hoppar över block utan valid tidsrad:", block.substring(0, 50));
-            continue;
+            // console.warn("Deduplicate: Hoppar över block utan valid tidsrad:", block.substring(0,50));
+            continue; 
         }
         entries.push({ timeLine: lines[0], originalText: lines.slice(1).join('\n').trim() });
     }
@@ -374,79 +412,77 @@ function deduplicateSlimmedSrt(slimmedSrtString) {
     }
 
     const cleanedEntries = [];
-    let textOfLastContributingEntry = "";
+    let lastPushedFullText = ""; // Håll reda på hela den text som senast lades till eller byggdes på
 
     for (let i = 0; i < entries.length; i++) {
-        const currentOriginalText = entries[i].originalText;
-        let textToProcess = currentOriginalText;
+        const currentEntry = entries[i];
+        const currentOriginalText = currentEntry.originalText;
 
         if (cleanedEntries.length > 0) {
-            const lastCleanedEntryText = cleanedEntries[cleanedEntries.length - 1].text;
+            const lastCleanedEntry = cleanedEntries[cleanedEntries.length - 1];
 
-            if (currentOriginalText === textOfLastContributingEntry) {
-                if (lastCleanedEntryText === currentOriginalText || currentOriginalText.endsWith(lastCleanedEntryText)) {
-                    cleanedEntries[cleanedEntries.length - 1].timeLine = entries[i].timeLine;
+            // 1. Exakt samma text som den förra PUSHADE texten -> uppdatera bara tid för den förra.
+            if (currentOriginalText === lastPushedFullText) {
+                lastCleanedEntry.timeLine = currentEntry.timeLine; // Uppdatera sluttiden på den förra
+                continue; // Hoppa över att lägga till denna, då den är identisk med vad som redan hanterats
+            }
+
+            // 2. Om nuvarande text börjar med den FÖREGÅENDE PUSHADE texten och lägger till nytt.
+            if (currentOriginalText.startsWith(lastPushedFullText) && currentOriginalText.length > lastPushedFullText.length) {
+                const newAppendedText = currentOriginalText.substring(lastPushedFullText.length).trim();
+                if (newAppendedText) {
+                    // Uppdatera den föregående posten med den nya texten och den nya tiden.
+                    lastCleanedEntry.text = (lastCleanedEntry.text + " " + newAppendedText).trim();
+                    lastCleanedEntry.timeLine = currentEntry.timeLine;
+                    lastPushedFullText = currentOriginalText; // Uppdatera vad som senast pushades
+                } else { 
+                    // Om det inte finns någon ny text (bara mellanslag), uppdatera bara tiden.
+                    lastCleanedEntry.timeLine = currentEntry.timeLine;
+                    lastPushedFullText = currentOriginalText; 
                 }
                 continue;
             }
-
-            if (textOfLastContributingEntry && currentOriginalText.startsWith(textOfLastContributingEntry)) {
-                let newAppendedText = currentOriginalText.substring(textOfLastContributingEntry.length).trim();
-
-                if (newAppendedText === "") {
-                    if (lastCleanedEntryText === textOfLastContributingEntry) {
-                        cleanedEntries[cleanedEntries.length - 1].timeLine = entries[i].timeLine;
-                    }
-                    textOfLastContributingEntry = currentOriginalText;
-                    continue;
-                }
-                textToProcess = newAppendedText;
-            }
-
-            if (textToProcess === lastCleanedEntryText) {
-                cleanedEntries[cleanedEntries.length - 1].timeLine = entries[i].timeLine;
-                textOfLastContributingEntry = currentOriginalText;
-                continue;
-            }
         }
-
-        if (textToProcess.trim() === "") {
-            textOfLastContributingEntry = currentOriginalText;
-            continue;
+        
+        // Om det är första posten, eller om den inte är relaterad till den föregående på ett uppenbart sätt
+        if (currentOriginalText.trim()) { // Lägg bara till om det finns text
+            cleanedEntries.push({ timeLine: currentEntry.timeLine, text: currentOriginalText });
+            lastPushedFullText = currentOriginalText;
         }
-
-        cleanedEntries.push({ timeLine: entries[i].timeLine, text: textToProcess });
-        textOfLastContributingEntry = currentOriginalText;
+    }
+    
+    // Ytterligare ett svep för att slå ihop identiska på varandra följande textblock
+    // (som kan ha uppstått efter den första rensningen)
+    if (cleanedEntries.length < 2) {
+        return cleanedEntries.map(entry => `${entry.timeLine}\n${entry.text}`).join('\n\n');
     }
 
-    const finalUniqueEntries = [];
-    const seenTexts = new Set();
-    for (let i = cleanedEntries.length - 1; i >= 0; i--) {
-        if (cleanedEntries[i].text.trim() === "") continue;
-        if (!seenTexts.has(cleanedEntries[i].text)) {
-            finalUniqueEntries.unshift(cleanedEntries[i]);
-            seenTexts.add(cleanedEntries[i].text);
+    const finalEntries = [cleanedEntries[0]];
+    for (let i = 1; i < cleanedEntries.length; i++) {
+        if (cleanedEntries[i].text === finalEntries[finalEntries.length - 1].text) {
+            finalEntries[finalEntries.length - 1].timeLine = cleanedEntries[i].timeLine; // Behåll den senare tiden
+        } else {
+            finalEntries.push(cleanedEntries[i]);
         }
     }
 
-    return finalUniqueEntries.map(entry => `${entry.timeLine}\n${entry.text}`).join('\n\n');
+    return finalEntries.map(entry => `${entry.timeLine}\n${entry.text}`).join('\n\n');
 }
 
 async function callNovitaAI(messages, temperature, top_p, requestSourceLabel, max_tokens = 4050) {
-    // ... (befintlig funktion)
     if (!NOVITA_API_KEY || !NOVITA_API_ENDPOINT || !NOVITA_MODEL_NAME) {
         console.error("Novita.ai API-konfiguration (LLM) är inte fullständigt satt.");
         throw new Error("Novita.ai API-konfiguration (LLM) är ofullständig. Kontrollera .env-filen.");
     }
 
     console.log(`Anropar Novita.ai LLM för: ${requestSourceLabel}. Modell: ${NOVITA_MODEL_NAME}. Max tokens: ${max_tokens}, Temp: ${temperature}`);
-
+    
     const requestBody = {
         model: NOVITA_MODEL_NAME,
         messages: messages,
         temperature: temperature,
         top_p: top_p,
-        max_tokens: max_tokens
+        max_tokens: max_tokens 
     };
 
     try {
@@ -455,7 +491,7 @@ async function callNovitaAI(messages, temperature, top_p, requestSourceLabel, ma
                 'Authorization': `Bearer ${NOVITA_API_KEY}`,
                 'Content-Type': 'application/json'
             },
-            timeout: 180000
+            timeout: 180000 // 3 minuter timeout
         });
 
         if (response.data && response.data.choices && response.data.choices.length > 0 && response.data.choices[0].message && response.data.choices[0].message.content) {
@@ -468,10 +504,10 @@ async function callNovitaAI(messages, temperature, top_p, requestSourceLabel, ma
     } catch (error) {
         console.error(`Novita.ai LLM API-fel för ${requestSourceLabel}:`, error.response ? JSON.stringify(error.response.data, null, 2) : error.message);
         if (error.response && error.response.data && error.response.data.reason === "MODEL_NOT_FOUND") {
-            throw new Error(`Novita.ai LLM API-fel: MODEL_NOT_FOUND. Kontrollera att modellen "${NOVITA_MODEL_NAME}" är korrekt och tillgänglig via endpointen "${NOVITA_API_ENDPOINT}".`);
+             throw new Error(`Novita.ai LLM API-fel: MODEL_NOT_FOUND. Kontrollera att modellen "${NOVITA_MODEL_NAME}" är korrekt och tillgänglig via endpointen "${NOVITA_API_ENDPOINT}".`);
         }
-        if (error.code === 'ECONNABORTED') {
-            throw new Error(`Novita.ai LLM API-fel: Timeout vid anrop (${error.message}). Försök igen senare eller justera timeout-inställningen.`);
+        if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+             throw new Error(`Novita.ai LLM API-fel: Timeout vid anrop (${error.message}). Försök igen senare eller justera timeout-inställningen.`);
         }
         const errorDetail = error.response && error.response.data ? (error.response.data.message || error.response.data.detail || JSON.stringify(error.response.data)) : error.message;
         throw new Error(`Novita.ai LLM API-fel: ${errorDetail}`);
@@ -479,12 +515,12 @@ async function callNovitaAI(messages, temperature, top_p, requestSourceLabel, ma
 }
 
 function sanitizeAiGeneratedText(text, sourceLabel = "Okänd") {
-    // ... (befintlig funktion)
     if (typeof text !== 'string') {
         console.warn(`sanitizeAiGeneratedText: input var inte en sträng för ${sourceLabel}. Returnerar tom sträng.`);
         return "";
     }
     let cleanedText = text;
+    // Lista med regex för att ta bort vanliga inledande fraser
     const commonLeadingPhrases = [
         /^\s*Här är (de begärda|dina) frågorna baserat på undertexten:*\s*\n*/im,
         /^\s*Här är (de begärda|dina) instuderingsfrågorna:*\s*\n*/im,
@@ -492,6 +528,10 @@ function sanitizeAiGeneratedText(text, sourceLabel = "Okänd") {
         /^\s*Baserat på den givna undertexten, här är (frågorna|svaren):*\s*\n*/im,
         /^\s*Okej, här kommer (frågorna|svaren):*\s*\n*/im,
         /^\s*Visst, här är (frågorna|svaren):*\s*\n*/im,
+        /^\s*Självklart! Här är frågorna:*\s*\n*/im,
+        /^\s*Här kommer ditt facit:*\s*\n*/im,
+        /^\s*Varsågod, här är frågorna:*\s*\n*/im,
+        /^\s*Här är förslagen på instuderingsfrågor:*\s*\n*/im
     ];
     let madeChange = false;
     do {
@@ -500,23 +540,29 @@ function sanitizeAiGeneratedText(text, sourceLabel = "Okänd") {
             const tempText = cleanedText.replace(regex, "");
             if (tempText !== cleanedText) {
                 cleanedText = tempText;
-                madeChange = true;
+                madeChange = true; // Om en ändring gjordes, kör loopen igen för att hantera flera matchningar
             }
         }
     } while (madeChange);
+
+    // Om texten efter borttagning av ledande fraser INTE börjar med numrering (t.ex. "1. ")
+    // OCH är relativt kort, logga en varning, eftersom det kan tyda på att AI:n inte följde instruktionerna.
     if (!cleanedText.trim().match(/^\s*[0-9]+\./m) && cleanedText.length < 100 && cleanedText.length > 0) {
-        if (text.length > cleanedText.length) {
-            console.warn(`AI output för ${sourceLabel} efter borttagning av ledande fraser börjar inte med numrering och är kort. Ursprunglig text: "${text.substring(0, 100)}...", Rensad: "${cleanedText.substring(0, 100)}..."`);
+        if (text.length > cleanedText.length) { // Om vi faktiskt tog bort något
+            console.warn(`AI output för ${sourceLabel} efter borttagning av ledande fraser börjar inte med numrering och är kort. Ursprunglig text: "${text.substring(0,100)}...", Rensad: "${cleanedText.substring(0,100)}..."`);
         }
     }
+    
     const commonTrailingPhrases = [
         /\n*\s*Hoppas detta hjälper!/im,
         /\n*\s*Säg till om du vill ha något ändrat eller fler frågor\./im,
         /\n*\s*Lycka till!/im,
+        /\n*\s*Fråga gärna om du undrar något mer!/im
     ];
     for (const regex of commonTrailingPhrases) {
         cleanedText = cleanedText.replace(regex, "");
     }
+    
     return cleanedText.trim();
 }
 
@@ -526,9 +572,6 @@ Följ alla formateringsinstruktioner EXAKT. Fokusera på den begärda fördelnin
 Generera ENDAST den numrerade listan med frågor. INGA SVAR i detta steg.`;
 
 function buildStrictStudentPrompt(totalTargetQuestions, distributionText, numMcq, numShortAnswer, numDiscussion, srtDataForPrompt) {
-    // ... (befintlig funktion, se till att beskrivningen av SRT-formatet är korrekt:
-    //      `Här är text från srt-filen (varje block inleds med sitt tidsintervall [starttid] --> [sluttid]):`
-    // )
     let userPromptStudentParts = [];
     userPromptStudentParts.push(`Här kommer text från en srt-fil. Skapa en lista med exakt ${totalTargetQuestions} innehållsnära, välformulerade instuderingsfrågor som är 100 % baserade på innehållet i hela srt-filen – från början till slut.`);
     userPromptStudentParts.push(`\nVIKTIGT: Innan du börjar formulera frågor, MÅSTE du läsa in, analysera och ta hänsyn till innehållet i HELA .srt-filen. Du får INTE enbart fokusera på början.`);
@@ -569,111 +612,187 @@ function buildStrictStudentPrompt(totalTargetQuestions, distributionText, numMcq
     return userPromptStudentParts.join('\n');
 }
 
-// --- ENDPOINT FÖR VIDEO NEDLADDNING ---
-app.post('/download-video', async (req, res) => {
+
+// --- NYA ENDPOINTS FÖR ASYNKRON VIDEONEDLADDNING ---
+
+app.post('/initiate-video-download', (req, res) => {
     const { mediaLink } = req.body;
     if (!mediaLink || !isValidUrl(mediaLink)) {
         return res.status(400).json({ error: 'Ogiltig eller saknad media-länk.' });
     }
 
-    const uniqueFileId = Date.now();
+    const jobId = crypto.randomBytes(8).toString('hex');
+    videoDownloadJobs[jobId] = {
+        status: 'pending',
+        mediaLink,
+        filePath: null,
+        fileName: null,
+        error: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+    };
+
+    console.log(`Jobb ${jobId} skapat för ${mediaLink}. Status: pending.`);
+    res.status(202).json({ jobId, message: 'Videonedladdning påbörjad.' }); // 202 Accepted
+
+    // Starta själva nedladdningen asynkront
+    processVideoDownload(jobId, mediaLink);
+});
+
+async function processVideoDownload(jobId, mediaLink) {
+    videoDownloadJobs[jobId].status = 'processing';
+    videoDownloadJobs[jobId].updatedAt = new Date();
+    console.log(`Jobb ${jobId} status: processing. Länk: ${mediaLink}`);
+
+    const uniqueFileId = Date.now(); // För att skapa unika temp-mappar
     const tempDir = os.tmpdir();
-    const outputDir = path.join(tempDir, `video_download_${uniqueFileId}`);
+    const jobSpecificOutputDir = path.join(tempDir, `video_job_${jobId}_${uniqueFileId}`);
 
     try {
-        await fs.mkdir(outputDir, { recursive: true });
+        await fs.mkdir(jobSpecificOutputDir, { recursive: true });
+        console.log(`Jobb ${jobId}: Temporär mapp skapad: ${jobSpecificOutputDir}`);
     } catch (mkdirError) {
-        console.error("Kunde inte skapa temporär mapp för nedladdning:", mkdirError);
-        return res.status(500).json({ error: 'Serverfel vid förberedelse av nedladdning (mkdir).' });
+        console.error(`Jobb ${jobId}: Kunde inte skapa temporär mapp ${jobSpecificOutputDir}:`, mkdirError);
+        videoDownloadJobs[jobId].status = 'failed';
+        videoDownloadJobs[jobId].error = 'Serverfel vid förberedelse av nedladdning (mkdir).';
+        videoDownloadJobs[jobId].updatedAt = new Date();
+        return;
     }
 
     let downloaderCmd, downloaderArgs;
     let isYoutubeVideo = false;
-    const desiredExtension = 'mp4'; // Fokusera på MP4
+    const desiredExtension = 'mp4';
 
     try {
         const parsedUrl = new URL(mediaLink);
         const hostname = parsedUrl.hostname.toLowerCase();
-        isYoutubeVideo = hostname.includes('youtube.com') || hostname.includes('youtu.be');
-    } catch (e) { /* Ignorera */ }
+        isYoutubeVideo = hostname.includes('youtube.com') || hostname.includes('youtu.be') || hostname.includes('youtube-nocookie.com') || hostname.includes('youtube.com');
+    } catch (e) { 
+        console.warn(`Jobb ${jobId}: Kunde inte parsa URL för att bestämma typ: ${mediaLink}`);
+    }
 
     if (isYoutubeVideo) {
-        downloaderCmd = 'yt-dlp';
+        downloaderCmd = '/opt/venv/bin/yt-dlp'; // Absolut sökväg
         downloaderArgs = [
-            '--no-warnings',
-            '--no-playlist',
-            mediaLink,
-            '-o', path.join(outputDir, `%(title)s.%(ext)s`),
-            '--format', `bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b`, // Stark preferens för MP4
+            '--no-warnings', '--no-playlist', mediaLink,
+            '-o', path.join(jobSpecificOutputDir, `%(title)s.%(ext)s`),
+            '--format', `bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b`, // Stark preferens MP4
             '--merge-output-format', 'mp4',
-            '--write-subs',
-            '--write-auto-subs',
-            '--sub-langs', 'sv.*,en.*',
-            '--embed-subs', // Försök bädda in undertexter
+            '--write-subs', '--write-auto-subs', '--sub-langs', 'sv.*,en.*',
+            '--embed-subs', '--verbose'
         ];
-        console.log("Använder yt-dlp för YouTube-video (siktar på MP4 med inbäddade undertexter).");
-    } else { // SVT Play eller UR Play
-        downloaderCmd = 'svtplay-dl';
+        console.log(`Jobb ${jobId}: Använder yt-dlp.`);
+    } else { // SVT/UR Play
+        downloaderCmd = '/opt/venv/bin/svtplay-dl'; // Absolut sökväg
         downloaderArgs = [
-            mediaLink,
-            '--output-format', 'mp4',
-            '-M', // Försök att muxa in standardundertext (oftast svenska)
-            '-o', outputDir
+            mediaLink, '--output-format', 'mp4', '-M', '--verbose',
+            '-o', jobSpecificOutputDir // svtplay-dl skapar filnamnet i denna mapp
         ];
-        console.log("Använder svtplay-dl för SVT/UR Play med kommando: svtplay-dl --output-format mp4 -M [länk]");
+        console.log(`Jobb ${jobId}: Använder svtplay-dl.`);
     }
-    console.log(`Fullständigt kommando för videonedladdning: ${downloaderCmd} ${downloaderArgs.join(' ')}`);
+    console.log(`Jobb ${jobId}: Fullständigt kommando: ${downloaderCmd} ${downloaderArgs.join(' ')}`);
 
     try {
-        const { error, stdout, stderr } = await execFilePromise(downloaderCmd, downloaderArgs, { timeout: 3600000 });
+        const { stdout, stderr } = await execFilePromise(downloaderCmd, downloaderArgs, { timeout: 7200000 }); // 2 timmars timeout
 
-        if (error) {
-            console.error(`Fel från ${downloaderCmd} under nedladdning:`, error, "\nStderr:", stderr, "\nStdout:", stdout);
-            await fs.rm(outputDir, { recursive: true, force: true }).catch(e => console.warn("Kunde inte städa outputDir efter nedladdningsfel:", e));
-            return res.status(500).json({ error: `Fel vid nedladdning av video: ${stderr || stdout || error.message}` });
-        }
+        // Logga stdout/stderr här också för att se vad som faktiskt hände
+        // console.log(`Jobb ${jobId}: ${downloaderCmd} stdout:\n${stdout}`);
+        // if (stderr) console.log(`Jobb ${jobId}: ${downloaderCmd} stderr:\n${stderr}`);
 
-        const files = await fs.readdir(outputDir);
+        const files = await fs.readdir(jobSpecificOutputDir);
         let videoFile = files.find(f => f.endsWith(`.${desiredExtension}`));
+        if (!videoFile) videoFile = files.find(f => f.endsWith('.mkv')); // Fallback till .mkv
 
         if (!videoFile) {
-            // Fallback om mp4 inte skapades men mkv gjorde det (t.ex. om yt-dlp valde mkv pga undertexter)
-            videoFile = files.find(f => f.endsWith('.mkv'));
-            if (videoFile) {
-                console.warn(`MP4 kunde inte skapas, använder istället hittad MKV-fil: ${videoFile}`);
-            } else {
-                console.error(`Ingen videofil (.mp4 eller .mkv) hittades i outputDir efter nedladdning. Filer:`, files);
-                await fs.rm(outputDir, { recursive: true, force: true }).catch(e => console.warn("Kunde inte städa outputDir, ingen videofil:", e));
-                return res.status(500).json({ error: 'Kunde inte hitta den nedladdade videofilen på servern.' });
-            }
+            console.error(`Jobb ${jobId}: Ingen videofil (.mp4 eller .mkv) hittades i ${jobSpecificOutputDir}. Filer:`, files.join(', '));
+            throw new Error('Kunde inte hitta den nedladdade videofilen på servern efter bearbetning.');
         }
 
-        const fullVideoPath = path.join(outputDir, videoFile);
-        console.log(`Video nedladdad till servern: ${fullVideoPath}. Skickar till klient som "${videoFile}"...`);
+        const fullVideoPath = path.join(jobSpecificOutputDir, videoFile);
+        console.log(`Jobb ${jobId}: Video nedladdad och bearbetad: ${fullVideoPath}`);
 
-        res.download(fullVideoPath, videoFile, async (downloadError) => {
-            if (downloadError) {
-                console.error(`Fel vid skickande av fil "${videoFile}" till klient:`, downloadError);
-            } else {
-                console.log(`Fil "${videoFile}" skickad till klienten.`);
-            }
-            console.log(`Försöker städa upp ${outputDir}`);
-            await fs.rm(outputDir, { recursive: true, force: true }).catch(e => console.warn(`Kunde inte städa upp ${outputDir}:`, e));
-        });
+        videoDownloadJobs[jobId].status = 'completed';
+        videoDownloadJobs[jobId].filePath = fullVideoPath;
+        videoDownloadJobs[jobId].fileName = videoFile; // Spara faktiska filnamnet
+        videoDownloadJobs[jobId].updatedAt = new Date();
+        console.log(`Jobb ${jobId} status: completed. Fil: ${videoFile}`);
 
     } catch (execError) {
-        console.error("Allvarligt fel under videonedladdningsprocessen:", execError);
-        await fs.rm(outputDir, { recursive: true, force: true }).catch(e => console.warn("Kunde inte städa outputDir efter allvarligt fel:", e));
-        if (!res.headersSent) {
-            res.status(500).json({ error: 'Internt serverfel vid videonedladdning.' });
-        }
+        console.error(`Jobb ${jobId}: Fel under videonedladdningsprocessen. Kommando: ${downloaderCmd}`);
+        console.error(`Jobb ${jobId}: Felmeddelande: ${execError.message}`);
+        if(execError.stderr) console.error(`Jobb ${jobId}: Stderr från kommandot: \n${execError.stderr}`);
+        if(execError.stdout) console.error(`Jobb ${jobId}: Stdout från kommandot: \n${execError.stdout}`);
+
+        videoDownloadJobs[jobId].status = 'failed';
+        videoDownloadJobs[jobId].error = `Fel vid nedladdning/bearbetning: ${execError.message.split('\n')[0]}`; // Ta första raden av felet
+        videoDownloadJobs[jobId].updatedAt = new Date();
+        console.log(`Jobb ${jobId} status: failed.`);
+        
+        await fs.rm(jobSpecificOutputDir, { recursive: true, force: true }).catch(e => console.warn(`Jobb ${jobId}: Kunde inte städa upp ${jobSpecificOutputDir} efter fel:`, e));
     }
+}
+
+app.get('/video-download-status/:jobId', (req, res) => {
+    const { jobId } = req.params;
+    const job = videoDownloadJobs[jobId];
+
+    if (!job) {
+        return res.status(404).json({ error: 'Jobb ej hittat.' });
+    }
+    // console.log(`Statusförfrågan för jobb ${jobId}: Status=${job.status}, Filnamn=${job.fileName || 'N/A'}`);
+    res.json({
+        jobId,
+        status: job.status,
+        fileName: job.fileName,
+        error: job.error,
+        updatedAt: job.updatedAt
+    });
 });
 
+app.get('/get-downloaded-video/:jobId', async (req, res) => {
+    const { jobId } = req.params;
+    const job = videoDownloadJobs[jobId];
 
-// --- ÖVRIGA ENDPOINTS ---
+    if (!job) {
+        console.warn(`Jobb ${jobId} ej hittat för nedladdning.`);
+        return res.status(404).json({ error: 'Jobb ej hittat.' });
+    }
+
+    if (job.status !== 'completed' || !job.filePath || !job.fileName) {
+        console.warn(`Jobb ${jobId} ej redo för nedladdning. Status: ${job.status}, Fil: ${job.filePath}`);
+        return res.status(400).json({ error: 'Videon är inte redo för nedladdning eller har misslyckats.' });
+    }
+
+    if (!fsc.existsSync(job.filePath)) {
+        console.error(`Jobb ${jobId}: Filen ${job.filePath} existerar inte trots status completed!`);
+        videoDownloadJobs[jobId].status = 'failed'; // Uppdatera statusen
+        videoDownloadJobs[jobId].error = 'Den bearbetade filen kunde inte hittas på servern (kan ha städats).';
+        videoDownloadJobs[jobId].updatedAt = new Date();
+        return res.status(500).json({ error: 'Internt serverfel: Bearbetad fil saknas.' });
+    }
+
+    console.log(`Jobb ${jobId}: Påbörjar skickande av fil: ${job.filePath} med namn: ${job.fileName}`);
+    res.download(job.filePath, job.fileName, async (downloadError) => {
+        const jobSpecificOutputDir = path.dirname(job.filePath); // Mappen som ska städas
+
+        if (downloadError) {
+            console.error(`Jobb ${jobId}: Fel vid skickande av fil "${job.fileName}" till klient:`, downloadError);
+            // Om det är ECONNABORTED, har klienten troligen avbrutit. Vi städar ändå.
+        } else {
+            console.log(`Jobb ${jobId}: Fil "${job.fileName}" skickad till klienten.`);
+        }
+        
+        console.log(`Jobb ${jobId}: Försöker städa upp ${jobSpecificOutputDir}`);
+        await fs.rm(jobSpecificOutputDir, { recursive: true, force: true }).catch(e => console.warn(`Jobb ${jobId}: Kunde inte städa upp ${jobSpecificOutputDir}:`, e));
+        
+        // Ta bort jobbet från minnet efter att det har hanterats (nedladdat eller misslyckats skicka)
+        delete videoDownloadJobs[jobId];
+        console.log(`Jobb ${jobId} borttaget från minnet efter hantering.`);
+    });
+});
+
+// --- DINA BEFINTLIGA ENDPOINTS ---
 app.post('/generate-student-questions', async (req, res) => {
-    // ... (befintlig kod, se till att srtDataForPrompt = deduplicateSlimmedSrt(parsedSrt);)
     const { mediaLink, counts } = req.body;
     if (!mediaLink || !isValidUrl(mediaLink)) {
         return res.status(400).json({ error: 'Ogiltig eller saknad media-länk (SVT Play, UR Play eller YouTube).' });
@@ -720,6 +839,11 @@ app.post('/generate-student-questions', async (req, res) => {
         const parsedSrt = parseAndSlimSrt(rawSrtFileData);
         const srtDataForPrompt = deduplicateSlimmedSrt(parsedSrt);
 
+        if (!srtDataForPrompt || srtDataForPrompt.trim() === "") {
+             console.warn("Efter parsning och deduplicering är SRT-datan tom. MediaLink:", mediaLink);
+             throw new Error("Undertexten blev tom efter bearbetning. Det finns inget att skapa frågor från.");
+        }
+
         const user_prompt_student = buildStrictStudentPrompt(
             totalTargetQuestions,
             distributionText,
@@ -730,13 +854,15 @@ app.post('/generate-student-questions', async (req, res) => {
         );
 
         const messages1 = [{ role: "system", content: systemMessageForStudentQuestions }, { role: "user", content: user_prompt_student }];
-        const estimatedOutputTokens = (totalTargetQuestions * 150) + (numMcq * 150);
-        const maxOutputTokens = Math.max(2500, Math.min(4050, estimatedOutputTokens));
+        // Uppskatta output tokens mer generöst
+        const estimatedOutputTokens = (totalTargetQuestions * 200) + (numMcq * 200); 
+        const maxOutputTokens = Math.max(2800, Math.min(4050, estimatedOutputTokens)); 
+
 
         let studentQuestionsText = await callNovitaAI(messages1, 1, 1, "Elevfrågor (med [start]-->[slut] SRT)", maxOutputTokens);
 
         console.log("\n--- RÅTT SVAR FRÅN AI (Elevfrågor - /generate-student-questions) ---");
-        console.log(studentQuestionsText);
+        console.log(studentQuestionsText.substring(0, 500) + (studentQuestionsText.length > 500 ? "..." : "")); // Logga bara början
         console.log("--- SLUT PÅ RÅTT SVAR ---\n");
 
         studentQuestionsText = sanitizeAiGeneratedText(studentQuestionsText, "Elevfrågor (med [start]-->[slut] SRT)");
@@ -748,14 +874,13 @@ app.post('/generate-student-questions', async (req, res) => {
         res.status(200).json({ studentText: studentQuestionsText });
 
     } catch (err) {
-        console.error(`Fel i /generate-student-questions: ${err.message}`, err.stack);
-        const clientErrorMessage = err.message.includes("Novita.ai") || err.message.includes("SRT-fil") || err.message.includes("AI:n genererade inga") || err.message.includes("Kunde inte hämta undertexter") || err.message.includes("Transkribering") ? err.message : `Serverfel under generering av elevfrågor.`;
+        console.error(`Fel i /generate-student-questions: ${err.message}`, err.stack ? err.stack.substring(0,500) : '');
+        const clientErrorMessage = err.message.includes("Novita.ai") || err.message.includes("SRT-fil") || err.message.includes("AI:n genererade inga") || err.message.includes("Kunde inte hämta undertexter") || err.message.includes("Transkribering") || err.message.includes("Undertexten blev tom") ? err.message : `Serverfel under generering av elevfrågor.`;
         res.status(500).json({ error: clientErrorMessage });
     }
 });
 
 app.post('/generate-teacher-answers', async (req, res) => {
-    // ... (befintlig kod, se till att srtDataForTeacherPrompt = deduplicateSlimmedSrt(parsedSrtForTeacher);)
     const { studentQuestions, mediaLink } = req.body;
     if (!studentQuestions || studentQuestions.trim() === "") {
         return res.status(400).json({ error: "Inga elevfrågor att skapa facit för." });
@@ -772,6 +897,12 @@ app.post('/generate-teacher-answers', async (req, res) => {
 
         const parsedSrtForTeacher = parseAndSlimSrt(rawSrtFileData);
         const srtDataForTeacherPrompt = deduplicateSlimmedSrt(parsedSrtForTeacher);
+
+        if (!srtDataForTeacherPrompt || srtDataForTeacherPrompt.trim() === "") {
+             console.warn("Efter parsning och deduplicering för FACIT är SRT-datan tom. MediaLink:", mediaLink);
+             throw new Error("Undertexten blev tom efter bearbetning. Det finns inget att skapa facit från.");
+        }
+
 
         const system_prompt_teacher = `Du är en AI-assistent som lägger till KORREKTA SVAR till en given lista med instuderingsfrågor.
 VIKTIGT: Din output MÅSTE börja direkt med den första numrerade frågan (t.ex. "1. ...") från elevversionen, följt av dess svar. Inkludera absolut ingen text, förklaring, resonemang, eller introduktion före den första frågan. All output som inte är en del av den numrerade listan med frågor och svar enligt format kommer att ignoreras.
@@ -815,8 +946,9 @@ ${studentQuestions}
 PÅMINNELSE: Generera ENBART den numrerade listan med frågor och svar enligt ovanstående format. Börja direkt med '1. ...'. Ingen extra text är tillåten.`;
 
         const messages2 = [{ role: "system", content: system_prompt_teacher }, { role: "user", content: user_prompt_teacher }];
-        const estimatedOutputTokensTeacher = studentQuestions.length * 3;
-        const maxOutputTokensTeacher = Math.max(3000, Math.min(4050, Math.ceil(estimatedOutputTokensTeacher)));
+        // Generösare uppskattning för facit
+        const estimatedOutputTokensTeacher = studentQuestions.length * 3.5; 
+        const maxOutputTokensTeacher = Math.max(3500, Math.min(4050, Math.ceil(estimatedOutputTokensTeacher)));
 
         let teacherVersionWithAnswers = await callNovitaAI(messages2, 0.2, 1, "Lärarsvar (med [start]-->[slut] SRT)", maxOutputTokensTeacher);
         teacherVersionWithAnswers = sanitizeAiGeneratedText(teacherVersionWithAnswers, "Lärarsvar (med [start]-->[slut] SRT)");
@@ -828,14 +960,13 @@ PÅMINNELSE: Generera ENBART den numrerade listan med frågor och svar enligt ov
         res.status(200).json({ teacherText: teacherVersionWithAnswers });
 
     } catch (err) {
-        console.error(`Fel i /generate-teacher-answers: ${err.message}`, err.stack);
-        const clientErrorMessage = err.message.includes("Novita.ai") || err.message.includes("SRT-fil") || err.message.includes("AI:n genererade inget") || err.message.includes("Kunde inte hämta undertexter") || err.message.includes("Transkribering") ? err.message : `Serverfel under generering av facit.`;
+        console.error(`Fel i /generate-teacher-answers: ${err.message}`, err.stack ? err.stack.substring(0,500) : '');
+        const clientErrorMessage = err.message.includes("Novita.ai") || err.message.includes("SRT-fil") || err.message.includes("AI:n genererade inget") || err.message.includes("Kunde inte hämta undertexter") || err.message.includes("Transkribering") || err.message.includes("Undertexten blev tom") ? err.message : `Serverfel under generering av facit.`;
         res.status(500).json({ error: clientErrorMessage });
     }
 });
 
 app.post('/generate-ai-prompt', async (req, res) => {
-    // ... (befintlig kod, se till att srtDataForPrompt = deduplicateSlimmedSrt(parsedSrt);)
     const { mediaLink, counts } = req.body;
     if (!mediaLink || !isValidUrl(mediaLink)) {
         return res.status(400).json({ error: 'Ogiltig eller saknad media-länk (SVT Play, UR Play eller YouTube).' });
@@ -861,6 +992,12 @@ app.post('/generate-ai-prompt', async (req, res) => {
 
         const parsedSrt = parseAndSlimSrt(rawSrtFileData);
         const srtDataForPrompt = deduplicateSlimmedSrt(parsedSrt);
+        
+        if (!srtDataForPrompt || srtDataForPrompt.trim() === "") {
+             console.warn("Efter parsning och deduplicering för PROMPT är SRT-datan tom. MediaLink:", mediaLink);
+             throw new Error("Undertexten blev tom efter bearbetning. Det finns inget att skapa prompt från.");
+        }
+
 
         let distributionTextParts = [];
         if (numMcq > 0) distributionTextParts.push(`${numMcq} flervalsfrågor`);
@@ -895,8 +1032,8 @@ app.post('/generate-ai-prompt', async (req, res) => {
         res.status(200).json({ promptText: promptForUserDisplay });
 
     } catch (err) {
-        console.error(`Fel i /generate-ai-prompt: ${err.message}`, err.stack);
-        const clientErrorMessage = err.message.includes("SRT-fil") || err.message.includes("Kunde inte hämta undertexter") || err.message.includes("Transkribering") ? err.message : `Serverfel vid generering av AI-prompt.`;
+        console.error(`Fel i /generate-ai-prompt: ${err.message}`, err.stack ? err.stack.substring(0,500) : '');
+        const clientErrorMessage = err.message.includes("SRT-fil") || err.message.includes("Kunde inte hämta undertexter") || err.message.includes("Transkribering") || err.message.includes("Undertexten blev tom") ? err.message : `Serverfel vid generering av AI-prompt.`;
         res.status(500).json({ error: clientErrorMessage });
     }
 });
